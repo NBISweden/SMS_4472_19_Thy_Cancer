@@ -1,0 +1,2047 @@
+---
+title: '4472: Whole-genome sequencing of thyroid cancer to aid in diagnosis, prognostication
+  and treatment,'
+author: "Nima Rafati"
+date: "5/22/2019"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    code_folding: hide
+    toc: yes
+---
+# Functions
+```{r functions_general, echo = T, eval = F}
+extractRegion<-function(data,chr,start,end,distance){
+	x<-data
+	x.chr<-x[which(x[,1]==chr),]
+	x.chr.start<-x.chr[which(x.chr[,2]>=start-distance),]
+	x.chr.start.end<-x.chr.start[which(x.chr.start[,2]<=end+distance),]
+	return(x.chr.start.end)
+}
+```
+
+# Mutect2  
+## Mutect2 filtering and extracting  snpEff info  
+In order to filter for low quality variants, we have to create panel of normal by using Mutect2.  
+```{bash, eval=F, echo=T}
+##Creating PON per sample: Start 
+cd /proj/sens2019505/nobackup/nima/scripts/
+echo "#!/bin/bash -l
+#SBATCH -A sens2019505
+#SBATCH -p node
+#SBATCH -t 48:00:00
+#SBATCH -J PON
+cd /castor/project/proj_nobackup/merged_results/Mutect2/PON/" >Sbatch_PON.script
+while read line 
+do
+echo "/sw/bioinfo/GATK/4.1.1.0/bianca/gatk Mutect2 -R /proj/sens2019505/nobackup/nima/Reference/Ref_with_chr.fa \
+-I /proj/sens2019505/nobackup/output/$line/Preprocessing/Recalibrated/${line}N.recal.bam \
+-tumor ${line}N -L targets.interval_list -O ${line}N_for_PON.vcf.gz >${line}_PON.log &" >>Sbatch_PON.script
+done<vcf.files
+echo "wait" >>Sbatch_PON.script
+## PON per sample: End
+
+##Merging all PON: Start
+echo "/sw/bioinfo/GATK/4.1.1.0/bianca/gatk CreateSomaticPanelOfNormals \
+-O pon.vcf.gz \\" >>Sbatch_PON.script
+
+while read line 
+do
+  echo "-V ${line}N_for_PON.vcf.gz \\" >>Sbatch_PON.script
+done<vcf.files
+
+##Merging all PON: End
+
+```
+
+After creating panel of normal we re-ran Mutect2.  
+```{bash, eval= F, echo = T}
+##Running Mutect2 to creat somatic calls: Start
+echo '#!/bin/bash -l
+#SBATCH -A sens2019505
+#SBATCH -p core -n 4
+#SBATCH -t 48:00:00
+#SBATCH -J Mutect2_w_PON
+cd /castor/project/proj_nobackup/merged_results/Mutect2/PON/' >Sbatch_Mutect2_with_PON.script
+while read line 
+do
+echo '/sw/bioinfo/GATK/4.1.1.0/bianca/gatk Mutect2 \
+-R /proj/sens2019505/nobackup/nima/Reference/Ref_with_chr.fa \
+-I /proj/sens2019505/nobackup/output/$line/Preprocessing/Recalibrated/${line}T.recal.bam \
+-I /proj/sens2019505/nobackup/output/$line/Preprocessing/Recalibrated/${line}N.recal.bam \
+-normal ${line}N \
+-L targets.interval_list \
+--germline-resource /proj/sens2019505/nobackup/wharf/nimar/nimar-sens2019505/Reference/swegen_frequencies_fixploidy_GRCh38_20190204.vcf.gz \
+--panel-of-normals /castor/project/proj_nobackup/merged_results/Mutect2/PON/pon.vcf.gz \
+-O somatic_${line}.vcf.gz &' >>Sbatch_Mutect2_with_PON.script
+done<vcf.files
+echo "wait" >>Sbatch_Mutect2_with_PON.script
+##Running Mutect2 to creat somatic calls: End
+```
+
+The new Mutect2 calls were then filtered by FilterMutectCalls.  
+```{bash Mtect2_Final_Filtering, eval =F}
+##Filtering Mutect2 somatic calls: Start
+echo "cd /castor/project/proj_nobackup/merged_results/Mutect2/PON/"
+while read line 
+do
+echo '/sw/bioinfo/GATK/4.1.1.0/bianca/gatk FilterMutectCalls -R /castor/project/proj_nobackup/nima/Reference/Ref_with_chr.fa -V somatic_${line}.vcf.gz -O somatic_${line}_filtered.vcf.gz --add-output-vcf-command-line ' 
+done<vcf.files
+##Filtering Mutect2 somatic calls: End
+```
+
+Multi-allelic variants were then converted to bi-allelic calls.
+```{bash, eval=F}
+##Keeping BIALLELIC variants: Start 
+cd /proj/sens2019505/nobackup/nima/scripts/
+echo "#!/bin/bash -l
+#SBATCH -A sens2019505
+#SBATCH -p node
+#SBATCH -t 1:00:00
+#SBATCH -J Select_Mutect2_PASS" >Sbatch_Mutect2.script
+while read line 
+do
+echo "java -jar /sw/bioinfo/GATK/4.1.1.0/bianca/gatk-package-4.1.1.0-local.jar SelectVariants \
+--exclude-filtered T \
+-R /castor/project/proj_nobackup/nima/Reference/Ref_with_chr.fa \
+-V /castor/project/proj_nobackup/merged_results/Mutect2/With_Freq/mutect2_${line}T_vs_${line}_snpEff_VEP.ann.AF.vcf \
+-O /castor/project/proj_nobackup/merged_results/Mutect2/With_Freq/mutect2_${line}T_vs_${line}_snpEff_VEP_BIALLELIC.ann.AF.vcf  >${line}_BIALLELEIC.log & " >>Sbatch_Mutect2.script
+done<vcf.files
+echo "wait" >>Sbatch_Mutect2.script
+ ##Keeping BIALLELIC variants: End
+ 
+##Splitting multiallelic sites: Start 
+echo "#!/bin/bash -l
+#SBATCH -A sens2019505
+#SBATCH -p node
+#SBATCH -t 1:00:00
+#SBATCH -J Split_multi_allelic_Mutect2_PON
+cd /castor/project/proj_nobackup/merged_results/Mutect2/PON/ " >Sbatch_PON_AF_PASS_split_multiallelic.script
+while read line 
+do
+echo "java -jar /sw/bioinfo/GATK/4.1.1.0/bianca/gatk-package-4.1.1.0-local.jar LeftAlignAndTrimVariants \
+--split-multi-allelics --dont-trim-alleles \
+-R /castor/project/proj_nobackup/nima/Reference/Ref_with_chr.fa \
+-V /castor/project/proj_nobackup/merged_results/Mutect2/PON/somatic_"${line}"_PASS.AF.vcf \
+-O /castor/project/proj_nobackup/merged_results/Mutect2/PON/somatic_"${line}"_PASS_split_multiallelic.AF.vcf  >${line}_somatic_split_multiallelic.log & " >>Sbatch_PON_AF_PASS_split_multiallelic.script
+done<vcf.files
+echo "wait" >>Sbatch_PON_AF_PASS_split_multiallelic.script
+##Splitting multiallelic sites: End
+
+```
+
+Mutect2: Extracting info from BIALLELIC files  
+```{bash, Mutect2_AF_Summary, eval = F}
+<!-- ANN CAF CSQ DP ECNT HMAF LOF NLOD NMD N_ART_LOD POP_AF RPA RU STR SWAF TLOD TOPMED dbSNP -->
+echo "#Creating tables of info for each individual" >Create_tables_Mutect2.sh
+while read line
+do
+echo "java -jar  /sw/bioinfo/snpEff/4.3t/bianca/SnpSift.jar extractFields -s \",\" -e \".\" /castor/project/proj_nobackup/merged_results/Mutect2/With_Freq/mutect2_${line}T_vs_${line}N_snpEff_VEP_BIALLELIC.ann.AF.vcf CHROM POS ID REF ALT ECANT NLOD TLOD N_ART_LOD POP_AF CAF HMAF SWAF TOPMED GEN[*].GT GEN[*].AD GEN[*].F1R2 GEN[*].F2R1 GEN[*].MBQ GEN[*].MMQ GEN[*].MFRL GEN[*].MPOS \"ANN[*].EFFECT\" \"EFF[*].GENE\" CSQ >/castor/project/proj_nobackup/merged_results/Mutect2/With_Freq/mutect2_${line}T_vs_${line}N_snpEff_VEP_BIALLELIC.ann.AF.table &" >>Create_tables_Mutect2.sh
+done<vcf.files
+```
+
+Variant calls were annotated by population frequencies.  
+```{bash Annotating_variants_by_AF, eval = F}
+##Annotating variants by AF: Start
+echo 'module load bioinfo-tools vcfanno
+cd /castor/project/proj_nobackup/merged_results/Mutect2/PON/' >Annotation_AF.sh
+while read line
+do
+echo 'vcfanno -p 16 /castor/project/proj_nobackup/own_references/3AFs.toml somatic_'${line}'_filtered.vcf.gz >somatic_'${line}'_filtered.AF.vcf.gz' >>Annotation_AF.sh
+done<vcf.files
+##Annotating variants by AF: End
+```
+
+We annotated the effect of the mutations on protein function by snpEff  
+```{bash Annotating_by_snpEff, eval=F}
+##Annotating by snpEff: Start 
+echo "#!/bin/bash -l
+#SBATCH -A sens2019505
+#SBATCH -p node
+#SBATCH -t 2:00:00
+#SBATCH -J snpEff_Mutect2_PON
+cd /castor/project/proj_nobackup/merged_results/Mutect2/PON/ " >Sbatch_PON_AF_PASS_snpEff.script
+while read line 
+do
+echo "java -jar /sw/bioinfo/snpEff/4.3t/bianca/snpEff.jar GRCh38.86 -csvStats somatic_"${line}"_PASS_split_multiallelic.AF.csv -nodownload -canon -v somatic_"${line}"_PASS_split_multiallelic.AF.vcf > somatic_"${line}"_PASS_split_multiallelic_snpEff.ann.AF.vcf &" >>Sbatch_PON_AF_PASS_snpEff.script
+done<vcf.files
+echo "wait" >>Sbatch_PON_AF_PASS_snpEff.script
+##Annotating by snpEff: End
+```
+
+Venn_Diagram of variants detected for MutSIg  
+```{r, eval = F}
+#Variant_ID <- data.frame(ID = unique(unlist(lapply(my_list, function(x) x[[3]])))) #Extract variants ID
+
+#Create list of unique variant IDs
+for(i in 1:nrow(samples)){
+  sample <- samples[i,1]
+  cat('\r', sample)
+  tmp_list <- my_list[[as.character(sample)]]
+  tmp_list[(tmp_list$ID == '.'), 'ID'] <- paste0(tmp_list$Chr, ':', tmp_list$POS) 
+  Variant_ID <- c(Variant_ID, tmp_list$ID)
+}
+Variant_ID <- unique(Variant_ID) #Remove duplicated IDs
+Variant_ID <- data.frame(ID = Variant_ID) #Convert to data.frame
+
+#Create a matrix from all variants x individuals
+Variant_ID_df <- data.frame(matrix(as.numeric(0),nrow = nrow(Variant_ID), ncol = nrow(samples)))
+colnames(Variant_ID_df) <- as.character(samples[,1])
+rownames(Variant_ID_df) <- Variant_ID$ID
+cntr <- 0
+for(i in 1:nrow(samples)){
+  sample <- samples[i,1]
+  cat('\r', sample)
+  tmp_list <- my_list[[as.character(sample)]]
+  tmp_Variant_id <- merge(Variant_ID, tmp_list, by ='ID')
+  Variant_ID_df[as.character(tmp_Variant_id$ID), as.character(sample)] <- 1
+}
+Variant_ID_df$Sum <- rowSums(Variant_ID_df) #Sum of the observed variants in all samples
+Variant_ID_df['Col_Sum',] <- colSums(Variant_ID_df) #Sum of the observed variants in each sample
+#Create overlappign matrix
+Overlapping_matrix <- matrix(0, nrow(samples), nrow(samples))
+colnames(Overlapping_matrix) <- as.character(samples[,1])
+rownames(Overlapping_matrix) <- as.character(samples[,1])
+for(i in 1:nrow(samples)){
+  sample_i <- as.character(samples[i,1])
+  for(j in 1:nrow(samples)){
+    if(i == j){
+      Overlapping_matrix[i,j] <- 1
+    }else{
+      sample_j <- as.character(samples[j,1])
+      cat('\r', paste0(sample_i, ' vs ', sample_j))
+      tmp_Variant_ID_df <- Variant_ID_df[(Variant_ID_df[,sample_i] == 1 & Variant_ID_df[,sample_j] == 1 & Variant_ID_df == 2),]
+      overlap <- round(nrow(tmp_Variant_ID_df)/max(Variant_ID_df[,c(sample_i, sample_j)]) ,4)
+      if(overlap >= 0.1){
+        Overlapping_matrix[i,j] <- overlap
+        Overlapping_matrix[j,i] <- overlap
+      }
+    }
+  }
+}
+write.table(Overlapping_matrix, 'Overlapping_matrix_of_variants.txt', col.names = T,row.names = T, sep = '\t', quote = F)
+```
+
+Process TCGA data to add to small variant analyses plot  
+```{r, eval = F}
+library(dplyr)
+library(tibble)
+TCGA_mutations_path <- '/castor/project/proj_nobackup/merged_results/Database/TCGA/data_mutations_extended.txt'
+TCGA_mutations <- read.table(TCGA_mutations_path, header = 1, fill = T)
+TCGA_genes_list <- unique(TCGA_mutations$Hugo_Symbol)
+TCGA_gene_mutation <- as.data.frame(Create_freq(data = TCGA_mutations, key = 'Hugo_Symbol', value = 'Consequence'))
+# Mutations_to_sum <- c("3_prime_UTR_variant",	"5_prime_UTR_variant",	"downstream_gene_variant",	"frameshift_variant",	"intron_variant",	"missense_variant",	"non_coding_transcript_exon_variant",	"splice_acceptor_variant",	"splice_donor_variant",	"splice_region_variant",	"start_lost",	"stop_gained",	"synonymous_variant",	"upstream_gene_variant",	"inframe_deletion",	"inframe_insertion") #List of terms/mutations that were used to select and sum over for each gene in Mutect2.
+Mutations_to_sum <- c("disruptive_inframe_deletion", "conservative_inframe_insertion", "conservative_inframe_deletion", "disruptive_inframe_insertion", "missense_variant", "synonymous_variant", "frameshift_variant", "stop_gained", "start_lost") #List of terms/mutations that were used to select and sum over for each gene in Mutect2.
+
+Mutations_to_sum_columns <- sort(unique(unlist(sapply(Mutations_to_sum, function(Y) grep(pattern = Y, x = colnames(TCGA_gene_mutation)))))) #Get columns ID that have Mutations_to_sum terms/mutations to sum and compare to total count of all mutations
+
+TCGA_gene_mutation <- cbind.data.frame(TCGA_gene_mutation, 
+                                       TCGA_Sum_all = rowSums(TCGA_gene_mutation), TCGA_Sum_selected = rowSums(TCGA_gene_mutation[,Mutations_to_sum_columns]), 
+                                       TCGA_Frequency = as.numeric(format(rowSums(TCGA_gene_mutation[,Mutations_to_sum_columns]) / rowSums(TCGA_gene_mutation), digits =  2))) #Add sum of all mutations and selected mutations to the matrix/table
+
+#Comapring to Mutect2 data
+All_Genes_EFF_count_table <- read.table('/castor/project/proj_nobackup/merged_results/Mutect2/PON/All_Genes_EFF_count_table.txt', header = T, row.names = 1)
+colnames(All_Genes_EFF_count_table)[26] <- 'Gene_name'
+All_Genes_EFF_count_table_TCGA_gene_mutation <- merge(TCGA_gene_mutation[,c('TCGA_Sum_all', 'TCGA_Sum_selected', 'TCGA_Frequency')], All_Genes_EFF_count_table[,c('Sum_all', 'Sum_selected', 'Mutation_frac')], by = 'row.names')
+rownames(All_Genes_EFF_count_table_TCGA_gene_mutation) <- All_Genes_EFF_count_table_TCGA_gene_mutation$Row.names
+All_Genes_EFF_count_table_TCGA_gene_mutation$TCGA_Frequency <- All_Genes_EFF_count_table_TCGA_gene_mutation$TCGA_Frequency *100
+All_Genes_EFF_count_table_TCGA_gene_mutation <- tbl_df(All_Genes_EFF_count_table_TCGA_gene_mutation)
+colnames(All_Genes_EFF_count_table_TCGA_gene_mutation)[1] <- 'Gene_name'
+
+```
+
+Process COSMIC data  
+```{bash, eval = F}
+cd /proj/nobackup/sens2019505/nima/merged_results/Database/COSMIC
+##
+zcat CosmicGenomeScreensMutantExport.tsv.gz | head -1  >Cosmic_Genome_Confirmed_Somatic_hg38.txt
+zcat CosmicGenomeScreensMutantExport.tsv.gz | awk '(/Confirmed somatic variant/ && $25 == 38)'  >>Cosmic_Genome_Confirmed_Somatic_hg38.txt
+##
+##CosmicMutantExport: 
+#zcat CosmicMutantExport.tsv.gz | head -1  >Cosmic_Mutant_Confirmed_Somatic_hg38_thyroid.txt 
+zcat CosmicMutantExport.tsv.gz | awk '(/Confirmed somatic variant/ && $25 == 38 && $8 == "thyroid")' | sed 's/Complex - /Complex_/' | sed 's/Deletion - /Deletion_/' | sed 's/Insertion - /Insertion_/' | sed 's/Nonstop /Nonstop_/' | sed 's/Substitution - /Substitution_/' | sed 's/Confirmed somatic variant/Confirmed_somatic_variant/' | sed 's/\t\t\t/\t\.\t\.\t/g' | sed 's/\t\t/\t\.\t/g' >>Cosmic_Mutant_Confirmed_Somatic_hg38_thyroid.txt | tr ' ' '_' >Cosmic_Mutant_Confirmed_Somatic_hg38_thyroid.txt
+##
+```
+
+Visualise Cosmic data
+```{r, eval = F}
+library(dplyr)
+library(tibble)
+COSMIC_mutations_path <- '/castor/project/proj_nobackup/merged_results/Database/COSMIC/Cosmic_Mutant_Confirmed_Somatic_hg38_thyroid.txt'
+COSMIC_mutations <- read.table(COSMIC_mutations_path, header = T, fill = T)
+colnames(COSMIC_mutations) <- c("Gene_name", "Accession_Number", "Gene_CDS_length", "HGNC_ID", "Sample_name", "ID_sample", "ID_tumour", "Primary_site", "Site_subtype_1", "Site_subtype_2", "Site_subtype_3", "Primary_histology", "Histology_subtype_1", "Histology_subtype_2", "Histology_subtype_3", "Genome-wide_screen", "GENOMIC_MUTATION_ID", "LEGACY_MUTATION_ID", "MUTATION_ID", "Mutation_CDS", "Mutation_AA", "Mutation_Description", "Mutation_zygosity", "LOH", "GRCh", "Mutation_genome_position", "Mutation_strand", "SNP", "Resistance_Mutation", "FATHMM_prediction", "FATHMM_score", "Mutation_somatic_status", "Pubmed_PMID", "ID_STUDY", "Sample_Type", "Tumour_origin", "Age")
+COSMIC_mutations_gene <- unique(COSMIC_mutations$Gene)
+##Selecte top 20 Mutsig mutations
+colnames(Mutsig)[3] <- 'Gene_name'
+COSMIC_mutations <- merge(COSMIC_mutations, Mutsig[1:20,], 'Gene_name')
+##
+COSMIC_gene_mutation <- Create_freq(data = COSMIC_mutations, key = 'Gene_name', value = 'Mutation_Description')
+colnames(COSMIC_gene_mutation)[1] <- 'Unknown'
+COSMIC_gene_mutation_original <- COSMIC_gene_mutation
+row_sum <- rowSums(COSMIC_gene_mutation)
+row_sum_coding <- rowSums(COSMIC_gene_mutation[,c('Deletion_Frameshift', 'Insertion_Frameshift', 'Substitution_Missense', 'Substitution_Nonsense')])
+COSMIC_gene_mutation <- tbl_df(cbind.data.frame(COSMIC_gene_mutation, COSMIC_Sum_all = row_sum, COSMIC_Sum_coding = row_sum_coding, COSMIC_Freq = row_sum_coding*100/row_sum, Gene_name = rownames(COSMIC_gene_mutation_original)))
+
+All_Genes_EFF_count_table_TCGA_gene_mutation_COSMIC <- merge(COSMIC_gene_mutation, All_Genes_EFF_count_table_TCGA_gene_mutation, by = 'Gene_name')
+
+
+##Intersect genomic-regions
+my_list_COSMIC <- list()
+for(i in 1:nrow(samples)){
+  sample <- as.character(samples[i,1])
+  cat('\r',paste0('Intersecting',sample,'....'))
+  tmp_list <- my_list[[sample]]
+  tmp_list$COSMIC <- '.'
+  x <- merge(COSMIC_mutations[,c('Mutation_genome_position', 'Mutation_Description')], tmp_list)
+  if(nrow(x) >0){print(sample)}
+  my_list_COSMIC <- append(my_list_COSMIC,tmp_list)
+}
+names(my_list_COSMIC) <- samples[,1]
+#There are quite few overlaps
+# sample coordinate  mutation  gene
+# 105 19:8894969-8894969 missense_variant MUC16
+# 101 22:20091916-20091916 missense_variant DGCR8
+# 104 22:20091916-20091916 missense_variant DGCR8
+# 201 19:8894969-8894969 missense_variant MUC16
+# 202 19:8894969-8894969 missense_variant MUC16
+
+
+##
+```
+
+
+## Loading files in R for visualisation
+Mutect2: Analysing calls from Mutect2 and plotting  
+```{r Analysing_calls_from_Mutect2_1,eval=FALSE, echo = T, eval = F}
+library(knitr)
+library(ggplot2)
+my.path <- '/proj/sens2019505/nobackup/nima/merged_results/Mutect2/PON/' 
+samples <- read.table(paste0(my.path,'vcf.files'),header=F) #Read the sample id 
+samples <- as.data.frame(samples[order(samples[,1]),])
+
+my_stats <- c("ECNT", "GERMQ", "LOF", "NMD", "NLOD", "TLOD", "POPAF", "CAF", "SWAF", "TOPMED", "GT", "AD", "F1R2", "F2R1", "MBQ", "MMQ", "MFRL", "MPOS", "EFFECT", "GENE") 
+##Load Mutsig results and plot the q values and selecting top 20 genes as genes_of_interest
+Mutsig <- read.csv('/castor/project/proj_nobackup/output/MutSig2CV/hg19/sig_genes.txt', header = T, sep='\t')
+genes_of_interest <- as.character(Mutsig$gene[1:20])
+
+##Removing MUC16
+genes_of_interest <- genes_of_interest[-5]
+##
+
+Mutsig$q_cat <- round(-log10(Mutsig$q)) #-log10 of the q calues
+unique_q_cat <- unique(Mutsig$q_cat) #round to categorize -log10(q)
+unique_q_cat <- cbind.data.frame(q_cat = seq(min(unique_q_cat),max(unique_q_cat)), q_cat_col = brewer.pal(length(unique_q_cat), 'Blues')) #Assign colors to q_cat
+Mutsig <- merge(Mutsig, unique_q_cat, by = 'q_cat') #Merge the data.frame with unqie_q_cat and assigned colors
+Mutsig <- Mutsig[order(Mutsig$q_cat, decreasing=T),] #Reorder by q value
+
+png('Mutsig_q_value_top_20.png', width= 1200,height=300, res = 100)
+barplot(rep(1,20), col = as.character(Mutsig$q_cat_col[1:20]), xlab = '', ylab = '', border = NA, space = 0, axes = F)
+dev.off()
+##
+
+## Reading snpEff files and save them in the list.
+my_list <- list()
+for(i in 1:nrow(samples)){
+  sample <- as.character(samples[i,1])
+  cat('\r',paste0('Loading sample:',sample,'....'))
+  tmp_data <- read.table(paste0(my.path,'somatic_',sample,'_PASS_split_multiallelic_snpEff.ann.AF.table'),header = F, stringsAsFactors = FALSE, skip = 1)
+  colnames(tmp_data) <- c('CHROM','POS', 'ID', 'REF', 'ALT', my_stats)
+  ##Labling variants wihtout IDs by CHROM_POS
+  tmp_data[(tmp_data$ID == '.'),'ID'] <- paste0(tmp_data[(tmp_data$ID == '.'),'CHROM'], ':',tmp_data[(tmp_data$ID == '.'),'POS'])
+  tmp_data$Mutation_genome_position <- gsub('chr', '', paste0(tmp_data[,'CHROM'], ':',tmp_data[,'POS'], "-", tmp_data[,'POS']))
+  tmp_list <- list(tmp_data)
+  my_list <- append(my_list,tmp_list)
+}
+names(my_list) <- samples[,1]
+
+##
+## Calculating AF for each variant
+my_list_AF <- lapply(my_list, function(x) {tmp <- matrix(as.numeric(unlist(strsplit(split=",",gsub(".*:", "", perl = T, x[,'AD'])))), ncol = 2, byrow = T);cbind.data.frame(x, REF_FREQ_T = (tmp[,1]/rowSums(tmp[,1:2])))})
+
+
+##Calculate synonymous non synonymous mutation within 1mb region
+ref.fai <- read.table(paste0(my.path,'Ref_with_chr.fa.fai') , header  = F) #Loading chromosome sizes (fai file)
+ref.fai <- ref.fai[-25,1:2] #Keeping the first two columns (chr size) and remove chrMT
+colnames(ref.fai) <- c('Chr', 'Size')
+#Creating a matrix to save the mutation count
+Syn_missense_mutation_count_per_MB <- data.frame(matrix(0,nrow = 2, ncol = nrow(samples)),row.names = c('Nonsynonymous', 'Synonymous'))
+colnames(Syn_missense_mutation_count_per_MB) <- samples[,1]
+#looping through samples and chromosomes. Here I split the chromosome to 1mb windows and count number of synonymous and missense/nonsynonymous mutation within each sample
+#Looping through samples
+for(i in 1:nrow(samples)){
+  synonymous_count <- 0
+  missense_count <- 0
+  sum_ranges_mis <- 0
+  sum_ranges_syn <- 0
+  #Looping through chromosomes
+  for(chr in 1:nrow(ref.fai)){
+    cat('\r', samples[i,1],  ':', as.character(ref.fai[chr,1]), '\n')
+    sample <- as.character(samples[i,1])
+    tmp_list <- my_list[[sample]]
+    tmp_chr <- tmp_list[(tmp_list$CHROM == as.character(ref.fai[chr,1])),]
+    ranges <- seq(1,ref.fai[chr,2],1000000) #Creating range of 1mb regions in each chromosome
+    ranges[length(ranges)] <- ref.fai[chr,2]
+    for(r in 1:length(ranges)){
+      if(r == 1){ 
+        current_syn_count <- nrow(tmp_chr[grep('synonymous_variant',tmp_chr$EFFECT, perl = T),])
+        current_mis_count <- nrow(tmp_chr[grep('missense_variant',tmp_chr$EFFECT, perl = T),])
+        tmp_chr <- tmp_chr[(tmp_chr$POS <= ranges[r+1]),]
+        synonymous_count <- synonymous_count + current_syn_count
+        missense_count <- missense_count + current_mis_count
+        cat('\r', paste0('==> Missense: ',missense_count, ' Syn: ', synonymous_count))
+      }
+      else if(r<length(ranges)){
+        current_syn_count <- nrow(tmp_chr[grep('synonymous_variant',tmp_chr$EFFECT, perl = T),])
+        current_mis_count <- nrow(tmp_chr[grep('missense_variant',tmp_chr$EFFECT, perl = T),])
+        tmp_chr <- tmp_chr[(tmp_chr$POS > ranges[r] & tmp_chr$POS <= ranges[r+1]),]
+        synonymous_count <- synonymous_count + current_syn_count
+        missense_count <- missense_count + current_mis_count
+        cat('\r', paste0('==> Missense: ',missense_count, ' Syn: ', synonymous_count))
+      }
+      if(current_syn_count > 0){
+        sum_ranges_syn <- sum_ranges_syn + 1
+        print(synonymous_count)
+      }
+      if(current_mis_count > 0){
+        sum_ranges_mis <- sum_ranges_mis + 1
+        print(missense_count)
+      }
+    }
+  }
+  Syn_missense_mutation_count_per_MB['Synonymous',as.character(samples[i,1])] <- synonymous_count / sum_ranges_syn
+  Syn_missense_mutation_count_per_MB['Nonsynonymous',as.character(samples[i,1])] <- missense_count / sum_ranges_mis
+}
+Syn_missense_mutation_count_per_MB <- Syn_missense_mutation_count_per_MB[,order(colnames(Syn_missense_mutation_count_per_MB))] #Order by sample_ID
+
+
+pdf('Barplot_Mutatiosn_per_Mb_200317.pdf', width = 10, height = 7)
+barplot(as.matrix(Syn_missense_mutation_count_per_MB), col = c('blue', 'darkgreen'), xlab = 'Samples', cex.names = 0.8, ylab = 'Mutations per Mb')
+legend(x = 'topright', legend = c('Missense','Synonymous'), col = c('blue', 'darkgreen'), fill = c('blue', 'darkgreen'), bty = 'n')
+dev.off()
+##
+
+
+#Saving the genes and their corresponding effects.
+my_list_PASS <- my_list
+EFF_GENE <- list()
+genes_list <- ''
+for(i in 1:nrow(samples)){
+   sample <- as.character(samples[i,1])
+   cat('\r',paste0('Parsing sample:',sample,'....'))
+   effects <- unlist(strsplit(my_list_PASS[[sample]][,'EFFECT'], ':'))#, function(x) x[[1]]))
+   genes <- unlist(strsplit(my_list_PASS[[sample]][,'GENE'], ':'))
+   and_index <- grep("&",effects)
+   for(a in and_index){
+     tmp_effects <- strsplit(effects[a], '&')[[1]]
+     tmp_genes <- rep(genes[a], length(tmp_effects))
+     effects <- c(effects, tmp_effects)
+     genes <- c(genes, tmp_genes)
+   }
+   effects <- effects[-and_index]
+   genes <- genes[-and_index]
+   tmp_value <- list(data.frame(Sample = sample, EFFECT = effects,GENE = genes))
+   names(tmp_value) <- samples[i,1]
+   EFF_GENE <- append(EFF_GENE, tmp_value)
+}
+ 
+
+##Effect count table for all samples
+mutation_list <- unique(unlist(lapply(EFF_GENE, function(x) x[[2]]))) #Extract all the mutations
+tmp_EFF_count <- lapply(names(EFF_GENE), function(x) table(EFF_GENE[[x]][,'EFFECT'])) #Extract effects
+names(tmp_EFF_count) <- samples[,1] #name the lists according to samples name
+EFF_count_table <- data.frame(matrix(0, nrow = length(mutation_list), ncol = nrow(samples)))
+colnames(EFF_count_table) <- samples[,1]
+rownames(EFF_count_table) <- mutation_list
+#Loop through mutation list
+for(g in 1:length(mutation_list)){
+  for(i in 1:nrow(samples)){
+  tmp_list <- as.data.frame(tmp_EFF_count[[as.character(samples[i,1])]])
+  rownames(tmp_list) <- tmp_list[,1]
+  EFF_count_table[as.character(mutation_list[g]),as.character(samples[i,1])] <- tmp_list[as.character(mutation_list[g]),'Freq']
+  }
+}
+EFF_count_table <- EFF_count_table[order(rownames(EFF_count_table)),] #Reorder the table
+EFF_count_table['SUM',] <- colSums(EFF_count_table,na.rm=T) #Sum the counts of mutations
+##
+
+##Genes effect count table for all samples
+genes_list <- data.frame(GENE = unique(as.character(unlist(strsplit(as.character(unlist(lapply(EFF_GENE, function(x) x[[3]]))), '\\.'))))) #Extract gene list 
+All_Genes_EFF_count_table <- data.frame(matrix(0, nrow = nrow(genes_list), ncol = length(mutation_list)))
+colnames(All_Genes_EFF_count_table) <- as.character(mutation_list)
+rownames(All_Genes_EFF_count_table) <- as.character(genes_list$GENE)
+All_Genes_EFF_count_table$Gene <- as.character(genes_list$GENE)
+All_Genes_EFF_count_table$Sum <- 0
+for(i in 1:nrow(samples)){
+  cat('\r :', samples[i,1])
+  tmp_list <- as.data.frame(EFF_GENE[[as.character(samples[i,1])]])
+  tmp_list <- tmp_list[(tmp_list$GENE %in% genes_list$GENE),]
+  for(r in 1:nrow(tmp_list)){
+    cat('\r :', (nrow(tmp_list) - r)*100/nrow(tmp_list))
+    All_Genes_EFF_count_table[(All_Genes_EFF_count_table$Gene == as.character(tmp_list$GENE[r])),as.character(tmp_list$EFFECT[r])] <- All_Genes_EFF_count_table[(All_Genes_EFF_count_table$Gene == as.character(tmp_list$GENE[r])),as.character(tmp_list$EFFECT[r])] + 1
+  }
+}
+
+# Mutations_to_sum <- c("splice_donor", "splice_acceptor", "disruptive_inframe_deletion", "conservative_inframe_insertion", "conservative_inframe_deletion", "disruptive_inframe_insertion", "missense", "synonymous", "frameshift", "stop_gained", "start_lost")
+
+Mutations_to_sum <- c("splice_donor", "splice_acceptor", "disruptive_inframe_deletion", "conservative_inframe_insertion", "conservative_inframe_deletion", "disruptive_inframe_insertion", "missense", "synonymous", "frameshift", "stop_gained", "start_lost", "upstream_gene") #For upstream/promoter region
+
+#Remove "_variant" from column names and match with Mutations_to_sum
+#******************** fix the colnames to follow the rest until clinical data 
+colnames(All_Genes_EFF_count_table) <- c(gsub('_variant','', as.character(mutation_list)), 'Gene', 'Sum')
+Mutations_to_sum <- Mutations_to_sum[Mutations_to_sum %in% names(All_Genes_EFF_count_table)]
+
+All_Genes_EFF_count_table$Sum_all <- rowSums(All_Genes_EFF_count_table[,1:25]) #Remove SUM and Gene name columns
+All_Genes_EFF_count_table$Sum_selected <- rowSums(All_Genes_EFF_count_table[,Mutations_to_sum])
+All_Genes_EFF_count_table$Mutation_frac <- All_Genes_EFF_count_table$Sum_selected*100/All_Genes_EFF_count_table$Sum_all
+
+#Select genes from Mutsig results and genes of interest
+genes_of_interest <- c(genes_of_interest, "NRAS", 	"HRAS", 	"KRAS", 	"AKT1", 	"PTEN", 	"PIK3CA",	"TSHR", 	"RB1", 	"GNAS", 	"IDH1", 	"TRRAP", 	"RET", 	"APC", 	"MUTYH", 	"RBM10", 	"ALK", 	"CDKN2A", 	"CDH1", 	"MEN1", 	"TERT", "PAX8", "PPARG")
+All_Genes_EFF_count_table_selected <- All_Genes_EFF_count_table[(All_Genes_EFF_count_table$Gene %in% genes_of_interest),]
+All_Genes_EFF_count_table_selected <- All_Genes_EFF_count_table_selected[order(All_Genes_EFF_count_table_selected$Mutation_frac, decreasing = F),]
+
+##Heatmap of mutations for genes of interest
+# genes_of_interest <- c('NRAS','KRAS', 'TP53', 'PIK3CA', 'PTEN','TERT')
+  Genes_EFF_count_table <- data.frame(matrix(NA, nrow = nrow(samples)*length(genes_of_interest), ncol = length(mutation_list)+2))
+  colnames(Genes_EFF_count_table) <- c('Sample', 'GENE', as.character(mutation_list))
+  Genes_EFF_count_table$Sample <- rep(samples[,1],length(genes_of_interest))
+  Genes_EFF_count_table$GENE <- rep(genes_of_interest,each = nrow(samples))
+  rownames(Genes_EFF_count_table) <- paste0(Genes_EFF_count_table$Sample,"_",Genes_EFF_count_table$GENE)
+  for(g in 1:length(genes_of_interest)){
+    for(i in 1:nrow(samples)){
+      tmp_data <- EFF_GENE[[as.character(samples[i,1])]]
+      tmp_data <- tmp_data[(as.character(tmp_data$GENE) == genes_of_interest[g]),]
+      if(nrow(tmp_data)>0){
+        for(eff in as.character(tmp_data$EFFECT)){
+          Genes_EFF_count_table[(Genes_EFF_count_table$Sample == samples[i,1] & Genes_EFF_count_table$GENE == as.character(genes_of_interest[g])),eff] <- nrow(tmp_data[(tmp_data$EFFECT == eff),])
+        }
+      }
+    }
+  }
+  ##
+  
+  Genes_EFF_count_table <- Genes_EFF_count_table[,colSums(is.na(Genes_EFF_count_table))<nrow(Genes_EFF_count_table)] #select columns with counts
+  Genes_EFF_count_table <- Genes_EFF_count_table[rowSums(is.na(Genes_EFF_count_table))<ncol(Genes_EFF_count_table)-2,] #select rowscolumns with counts
+  # Genes_EFF_count_table[is.na(Genes_EFF_count_table)] <- 0
+  
+  ##In order to plot only existence of any mutations (regardless of #mutations)
+  library(reshape2)
+  Genes_EFF_count_table <- data.frame(matrix(NA, nrow = nrow(samples)*length(genes_of_interest), ncol = length(mutation_list)+2))# We first create a matrix of sample_gene x Mutations
+  colnames(Genes_EFF_count_table) <- c('Sample', 'GENE', as.character(mutation_list))
+  Genes_EFF_count_table$Sample <- rep(samples[,1],length(genes_of_interest))
+  Genes_EFF_count_table$GENE <- rep(genes_of_interest,each = nrow(samples))
+  rownames(Genes_EFF_count_table) <- paste0(Genes_EFF_count_table$Sample,"_",Genes_EFF_count_table$GENE)
+  #We loop through the genes_of_interest to count number of disruptive mutations and assign them to the corresponding sample_gene x mutation
+  for(g in 1:length(genes_of_interest)){
+    for(i in 1:nrow(samples)){
+      tmp_data <- EFF_GENE[[as.character(samples[i,1])]]
+      tmp_data <- tmp_data[(as.character(tmp_data$GENE) == genes_of_interest[g]),]
+      if(nrow(tmp_data)>0){
+        for(eff in as.character(tmp_data$EFFECT)){
+          Genes_EFF_count_table[(Genes_EFF_count_table$Sample == samples[i,1] & Genes_EFF_count_table$GENE == as.character(genes_of_interest[g])),eff] <- nrow(tmp_data[(tmp_data$EFFECT == eff),])
+        }
+      }
+    }
+  }
+
+#colnames(Genes_EFF_count_table) <- gsub('_variant','',c('Sample', 'GENE', as.character(mutation_list)))
+colnames(Genes_EFF_count_table) <- gsub('_variant','',colnames(Genes_EFF_count_table)
+  #Remove _variant in mutations list/column names
+Genes_EFF_count_table <- Genes_EFF_count_table[,colSums(is.na(Genes_EFF_count_table))<nrow(Genes_EFF_count_table)] #select columns with counts
+Mutations_to_sum <- Mutations_to_sum[Mutations_to_sum %in% names(Genes_EFF_count_table)] #Select Mutations availalbe in the samples and genes_interedt
+Genes_EFF_count_table <- Genes_EFF_count_table[order(Genes_EFF_count_table$GENE, Genes_EFF_count_table$Sample),c('Sample', 'GENE', Mutations_to_sum)] #Ordering the data,frame by both  GENE and Samples
+
+#Replacing NAs with zero and non-NA with cntr
+cntr <- 1
+for(col in 3:ncol(Genes_EFF_count_table)){
+  tmp <- Genes_EFF_count_table[,col]
+  tmp[!is.na(tmp) > 0 ] <- letters[cntr]
+  tmp[tmp == 0] <- "!"
+  tmp[is.na(tmp)] <- "!"
+  Genes_EFF_count_table[,col] <- tmp
+  cntr <- cntr + 1
+}
+
+
+## Creating CODEs for each gene to represent all the observed mutations in given gene
+tmp <- Genes_EFF_count_table[,3:ncol(Genes_EFF_count_table)]
+tmp$mutations_code <- 'NA'
+for(rw in 1:nrow(tmp)){
+  tmp$mutations_code[rw] <- (paste0(tmp[rw,1:ncol(tmp)], collapse=""))
+}
+
+#Replacing counts with letter codes in Genes_EFF_count_table
+Genes_EFF_count_table <- cbind.data.frame(Genes_EFF_count_table[,1:2],tmp)
+
+Genes_mutations_code <- data.frame(matrix('NA', nrow = nrow(samples), ncol = length(genes_of_interest)))
+colnames(Genes_mutations_code) <- genes_of_interest
+rownames(Genes_mutations_code) <- samples[,1]
+for(g in genes_of_interest){
+  Genes_mutations_code[,g] <- Genes_EFF_count_table[(as.character(Genes_EFF_count_table$GENE) == g),'mutations_code']
+}
+n_categories <- length(table(unlist(Genes_mutations_code))) -1
+key_code <- as.data.frame(cbind.data.frame(mutation_code = sort(as.data.frame(table(unlist(Genes_mutations_code)))[,1], decreasing=T), factor_code=seq(0,n_categories,1))) 
+
+for(my.char in 1:nrow(key_code)){
+  Genes_mutations_code[which(Genes_mutations_code == as.character(key_code[my.char,1]), arr.ind= T)] <- key_code[my.char,2] + 1
+}
+
+Genes_mutations_code <- as.matrix(matrix(as.integer(unlist(Genes_mutations_code)),nrow(samples),length(genes_of_interest)))
+colnames(Genes_mutations_code) <- genes_of_interest
+rownames(Genes_mutations_code) <- samples[,1]
+Genes_mutations_code <- Genes_mutations_code[order(rownames(Genes_mutations_code)),]
+
+# my.col <- c('#a50026','#d73027','#f46d43','#fdae61','#fee08b','#ffffbf','#d9ef8b','#a6d96a','#66bd63','#1a9850','#eeeeee') #With MUC16
+# pdf('Mutations_count_genes_of_interest_no.pdf', width=10, height=10)
+
+# my.col <- c('#','#d73027','#ffffbf','#d9ef8b','#a6d96a','#66bd63','#1a9850','#eeeeee') #Without MUC16
+#pdf('Mutations_count_genes_of_interest_no_MUC16.pdf', width=10, height=10)
+
+my.col <- c("#779ecb",	"lightblue",	"darkgoldenrod1",	"#ffdac1",	"#c7ceea",	"darkseagreen1",	"darkslategray3",	"#ff9aa2",	"deeppink2",	"gainsboro") #with upstream
+pdf('Mutations_count_genes_of_interest_no_MUC16_upstream_FTC.pdf', width=10, height=10)
+heatmap.2(t(Genes_mutations_code), dendrogram='none', Rowv=FALSE, Colv=FALSE, scale="none", density.info="none", trace="none", key=TRUE, keysize=1.2, cexCol=0.8, margins=c(5,10), labRow = colnames(Genes_mutations_code), main='Mutations', col = my.col)
+dev.off()
+
+
+#Generate #individuals that had mutations in genes ==> Frequenyc for barplot 
+mutations_in_gene <- c('Gene', 'Fraction')
+mutations_in_gene_count <- data.frame(matrix(0,ncol = length(mutations_in_gene),nrow=1))     
+colnames(mutations_in_gene_count) <- mutations_in_gene
+mutations_in_gene_count <- mutations_in_gene_count[FALSE,]
+
+tmp <- c('Sample', 'EFFECT', 'GENE')
+tmp_EFF_GENE <- data.frame(matrix(0, ncol= length(tmp), nrow = 1))
+colnames(tmp_EFF_GENE) <- tmp_EFF_GENE
+tmp_EFF_GENE <- tmp_EFF_GENE[FALSE,]
+
+for(g in 1:length(genes_of_interest)){
+   cat('\r', genes_of_interest[g])
+   tmp_data <- do.call("rbind.data.frame", (lapply(EFF_GENE, function(x) (x[(x$GENE == genes_of_interest[g]),]))))
+   Mutations_to_sum_count <- length(unlist(sapply(Mutations_to_sum, function(Y) grep(pattern = Y, x = as.character(tmp_data$EFFECT)))))
+   mutations_in_gene_count[genes_of_interest[g],'Fraction'] <- Mutations_to_sum_count*100/nrow(tmp_data)
+   mutations_in_gene_count[genes_of_interest[g],'Gene'] <- genes_of_interest[g]
+}
+# pdf('Mutation_fraction_genes_of_itnerest_Mutsig_20.pdf', width=10, height=10)
+pdf('Mutation_fraction_genes_of_itnerest_no_MUC16.pdf', width=10, height=10)
+barplot(mutations_in_gene_count$Fraction, names.arg =mutations_in_gene_count$Gene, las = 1, horiz = T, col = 'darkblue', main = 'Mutation fraction', xlim = c(0,100))
+dev.off()
+
+## Plot mutations in promoter region 
+my_stats <- c('ID', 'REF', 'ALT', 'EFFECT', 'Mutation_genome_position', 'Sample')
+TERT_mutations <- data.frame(matrix(0,ncol = length(my_stats),nrow=1))     
+colnames(TERT_mutations) <- my_stats
+TERT_mutations <- TERT_mutations[FALSE,]
+#TERT_coordinate <- data.frame(Chr = 'chr5', Start = 1294943, End = 1295291) #Promoter
+TERT_coordinate <- data.frame(Chr = 'chr5', Start = 1253167, End = 1294943) #gene + Promoter
+for(s in 1:nrow(samples)){
+  tmp_sample_mutect2 <- extractRegion(data = my_list[[as.character(samples[s,1])]], chr = TERT_coordinate$Chr, start = TERT_coordinate$Start, end = TERT_coordinate$End, distance = 5000)[,my_stats[-6]]
+  if(nrow(tmp_sample_mutect2) > 0){
+    TERT_mutations <- rbind.data.frame(TERT_mutations,cbind.data.frame(tmp_sample_mutect2, samples[s,1]))
+  }
+}
+##
+
+##Print table 
+kable(Genes_EFF_count_table)
+
+par(cex.main=0.5)
+heatmap.2(as.matrix(Genes_EFF_count_table[,3:ncol(Genes_EFF_count_table)]), dendrogram='none', Rowv=FALSE, Colv=FALSE, scale="none", density.info="none", trace="none", key=TRUE, keysize=1.2, cexCol=0.8, margins=c(8,8), labRow = rownames(Genes_EFF_count_table), main='Count of mutation type count top six candidate genes', , na.color = 'black', col = c('black','#d73027', '#fc8d59', '#fee090', '#e0f3f8', '#91bfdb', '#4575b4'))
+##Printing the table 
+kable(EFF_count_table)
+
+##Clinical data visualisation
+clinical_data <- read.table('/proj/sens2019505/nobackup/nima/merged_results/Clinical_data.txt', header = T) #read clinical data
+clinical_data <- clinical_data[order(clinical_data$sample),]
+clinical_data_numeric <- data.frame(WHO_2017 = as.numeric(clinical_data$WHO_2017), Onkocytar = as.numeric(clinical_data$Onkocytar), Stadium_AJCC_TNM_v8 = as.numeric(clinical_data$Stadium_AJCC_TNM_v8), Size = clinical_data$Size, AJCC_Stage_Diagnosis = as.numeric(clinical_data$AJCC_Stage_Diagnosis), AJJC_Stage_followup = as.numeric(clinical_data$AJJC_Stage_followup), Age_at_operation = clinical_data$Age_at_operation, Sex = as.numeric(clinical_data$Sex), Status_category = as.numeric(clinical_data$Status_category), Relapse = as.numeric(clinical_data$Replase), Local_Metastas = as.numeric(clinical_data$Local_metastas))
+
+
+pdf('Clinical_selected_pastel_color.pdf', width=10, height= 10)
+layout(matrix(c(1,2,3,4), 4, 1, byrow = TRUE), heights = c(50,30,10,10))
+
+#Per MB syn/non-syn mutations
+barplot(as.matrix(Syn_missense_mutation_count_per_MB), col = c("#c7ceea", "#b5ead7"), xlab = '', cex.names = 0.8, ylab = 'Mutations per Mb',xaxt='n')
+legend(x = 'topright', legend = c('Missense','Synonymous'), col = c("#c7ceea", "#b5ead7"), fill = c('blue', 'darkgreen'), bty = 'n')
+
+#Plot Size
+par(mar = c(0, 4, 3, 2))
+barplot(clinical_data$Size, ylab = 'Size', cex.names=0.5, xlab = '', xaxt ='n')
+
+##Plot Status_category
+par(mar = c(0, 4, 3, 2))
+tst <- clinical_data_numeric$Status_category
+ind1 <- as.numeric(tst == 1)
+ind2 <- as.numeric(tst == 2)
+ind3 <- as.numeric(tst == 3)
+barplot(t(cbind.data.frame(Dead = ind3, AWD = ind1, AWOD = ind2)),col = c('#ff9aa2', "#c7ceea", "#b5ead7"),axes = F, ylab ='Status category', cex.names = 0.6, xlab = '')
+
+##Plot Relapse
+par(mar = c(0, 4, 3, 2))
+tst <- clinical_data_numeric$Relapse
+ind1 <- as.numeric(tst == 1)
+ind2 <- as.numeric(tst == 2)
+barplot(t(cbind.data.frame(Relapse_Y = ind1, Relapse_N = ind2)),col = c('#ffdac1','chocolate3'), ylab = 'Relapse', cex.names = 0.6, xlab = '', axes = F)
+
+
+##Plot Age by Sex
+par(mar = c(0, 4, 3, 2))
+barplot(clinical_data$Age_at_operation,col = as.factor(clinical_data$Sex), ylab = 'Age (M=red,F=black)', cex.names=0.5)
+dev.off()
+
+
+##Plot WHO_2017
+par(mar = c(0, 4, 3, 2))
+tst <- clinical_data_numeric$WHO_2017
+ind1 <- as.numeric(tst == 1)
+ind2 <- as.numeric(tst == 2)
+barplot(t(cbind.data.frame(Relapse_Y = ind1, Relapse_N = ind2)),col = c('darkorchid','forestgreen'),axes = F, ylab = 'WHO_17', cex.names = 0.6)
+
+##Plot Onkocytar
+par(mar = c(0, 4, 3, 2))
+tst <- clinical_data_numeric$Onkocytar
+ind1 <- as.numeric(tst == 1)
+ind2 <- as.numeric(tst == 2)
+barplot(t(cbind.data.frame(Relapse_Y = ind1, Relapse_N = ind2)),col = c('deeppink','khaki3'),axes = F, ylab = 'Onkocytar', cex.names = 0.6)
+
+##Plot Stadium_AJCC_TNM_v8
+par(mar = c(0, 4, 3, 2))
+tst <- clinical_data_numeric$Stadium_AJCC_TNM_v8
+ind1 <- as.numeric(tst == 1)
+ind2 <- as.numeric(tst == 2)
+ind3 <- as.numeric(tst == 3)
+ind4 <- as.numeric(tst == 4)
+barplot(t(cbind.data.frame(pT1b = ind1, pT2 = ind2, pT3a = ind3, pT3b = ind4)),col = c('mediumvioletred','salmon4','seagreen2','slategray'),axes = F, ylab = 'TNM_v8', cex.names = 0.6)
+
+##Plot AJCC_Stage_Diagnosis
+par(mar = c(0, 4, 3, 2))
+tst <- clinical_data_numeric$AJCC_Stage_Diagnosis
+ind1 <- as.numeric(tst == 1)
+ind2 <- as.numeric(tst == 2)
+ind3 <- as.numeric(tst == 3)
+barplot(t(cbind.data.frame(I = ind1, II = ind2, IVB = ind3)),col = c('lightblue','blue','red'),axes = F, ylab ='Diagnosis', cex.names = 0.6)
+
+
+##Plot AJJC_Stage_followup
+par(mar = c(0, 4, 3, 2))
+tst <- clinical_data_numeric$AJJC_Stage_followup
+ind1 <- as.numeric(tst == 1)
+ind2 <- as.numeric(tst == 2)
+ind3 <- as.numeric(tst == 3)
+barplot(t(cbind.data.frame(I = ind1, II = ind2, IVB = ind3)),col = c('lightblue','blue','red'),axes = F, ylab ='followup', cex.names = 0.6)
+
+```
+
+Matching the heatmap (Somatic mutational landscape; figure 1 heamtap) with frequency 
+```{r, eval = F}
+library(stringr)
+my_list_AF <- lapply(my_list, function(x) {tmp <- matrix(as.numeric(unlist(strsplit(split=",",gsub(".*:", "", perl = T, x[,'AD'])))), ncol = 2, byrow = T);cbind.data.frame(x, REF_FREQ_T = (tmp[,1]/rowSums(tmp[,1:2])))})
+my_list_PASS <- my_list_AF
+for(s in 1:nrow(samples)){
+  sample <- as.character(samples[s,1])
+  cat('\r',paste0('Parsing sample:',sample,'....'))
+  df <- my_list_PASS[[sample]]
+  df$ID <- gsub(':','_',df$ID)
+  df$GENE_cntr <- str_count(df$EFFECT, "&")+1  #Count number ofgenes (&) in each line
+  for ( i in 1:nrow(df)){
+    tmp_EFFECT <- str_split_fixed(df$EFFECT[i],"&",df$GENE_cntr[i]) #splitting to columns based on number of genes (&)
+    if(length(tmp_EFFECT)>=1){
+      cntr <- 1
+      #Create string by repeating frequency depedent on number of entries in EFFECTs (:) and genes (&)
+      for(eff in tmp_EFFECT){
+        if(cntr == 1){
+          tmp_freq <- paste0(rep(df$REF_FREQ_T[i],str_count(eff, ":") +1), collapse = ":")
+          tmp_ID <- paste0(rep(df$ID[i],str_count(eff, ":") +1), collapse = ":")
+        }else{
+          tmp_freq <- paste0(c(tmp_freq,paste0(rep(df$REF_FREQ_T[i],str_count(eff, ":") +1),collapse = ":")),collapse =  "&")
+          tmp_ID <- paste0(c(tmp_ID,paste0(rep(df$ID[i],str_count(eff, ":") +1),collapse = ":")),collapse =  "&")
+        }
+        cntr <- cntr +1
+      }
+    }else{
+      tmp_freq = df$REF_FREQ_T
+    }
+    df$Concat_Freq[i] <- tmp_freq
+    df$Concat_ID[i] <- tmp_ID
+  }
+  my_list_PASS[[sample]] <- df
+}
+
+
+EFF_GENE <- list()
+genes_list <- ''
+for(i in 1:nrow(samples)){
+  sample <- as.character(samples[i,1])
+  cat('\r',paste0('Parsing sample:',sample,'....'))
+  tmp_df <- my_list_PASS[[sample]]
+  effects <- unlist(strsplit(tmp_df[,'EFFECT'], ':'))#, function(x) x[[1]]))
+  genes <- unlist(strsplit(tmp_df[,'GENE'], ':'))
+  ref_freq_t <- unlist(strsplit(tmp_df[,'Concat_Freq'], ':'))
+  id <- unlist(strsplit(tmp_df[,'Concat_ID'], ':'))
+  and_index <- grep("&",effects)
+  for(a in and_index){
+    tmp_effects <- strsplit(effects[a], '&')[[1]]
+    tmp_genes <- rep(genes[a], length(tmp_effects))
+    tmp_ref_freq_t <- rep(ref_freq_t[a], length(tmp_effects))
+    tmp_id <- rep(id[a], length(tmp_effects))
+    effects <- c(effects, tmp_effects)
+    genes <- c(genes, tmp_genes)
+    ref_freq_t <- c(ref_freq_t, tmp_ref_freq_t)
+    id <- c(id, tmp_id)
+  }
+  effects <- effects[-and_index]
+#  effects <- gsub('_variant', '', effects)
+  genes <- genes[-and_index]
+  ref_freq_t <- ref_freq_t[-and_index]
+  id <- id[-and_index]
+  tmp_value <- list(data.frame(Sample = sample, EFFECT = effects,GENE = genes, REF_FREQ_T = ref_freq_t, ID = id))
+  names(tmp_value) <- samples[i,1]
+  EFF_GENE <- append(EFF_GENE, tmp_value)
+}
+
+t <- sapply(EFF_GENE, function(x) gsub(pattern = '_variant', replacement = '', x = x$EFFECT))
+
+
+
+## Match the heatmap table with EFF_GENE consisting of frequencies and variant IDs
+heatmap_EFF_GENE <- data.frame(Sample = 0, EFFECT = 0, GENE = 0, REF_FREQ_T = 0, ID = 0)[FALSE,]
+for(i in 1:nrow(Genes_EFF_count_table)){
+  tmp_EFF_GENE <- EFF_GENE[[as.character(Genes_EFF_count_table$Sample[i])]]
+  tmp_EFF_GENE$EFFECT <- gsub('_variant', '', tmp_EFF_GENE$EFFECT)
+  tmp_EFF_GENE$ID <-  gsub("&.*", '', perl = T, tmp_EFF_GENE$ID)
+  tmp_EFF_GENE$REF_FREQ_T <-  gsub("&.*", '', perl = T, tmp_EFF_GENE$REF_FREQ_T)
+  for (eff in colnames(Genes_EFF_count_table[which(Genes_EFF_count_table[i,3:9] != "!")+2])){
+    heatmap_EFF_GENE <- rbind.data.frame(heatmap_EFF_GENE, 
+                                         tmp_EFF_GENE[(tmp_EFF_GENE$Sample == Genes_EFF_count_table$Sample[i] & 
+                                                         tmp_EFF_GENE$GENE == Genes_EFF_count_table$GENE[i] & 
+                                                         tmp_EFF_GENE$EFFECT == eff),])
+  }
+}
+
+write.table(heatmap_EFF_GENE, '/proj/sens2019505/SMS_4472_19_Thy_Cancer/results/1-Mutect2/Somatic_Mutational_lacnscape_Heatmap_Fig1.txt', sep = '\t', quote = F, col.names = T, row.names =  F)
+```
+
+
+
+
+
+# Manta
+## Extracting snpEFF info from Manta resutls
+Manta: Extracting info from  
+```{bash, Manta_snpEFF, eval = F}
+echo "#Creating tables of info for each individual" >Create_tables_Manta.sh
+while read line
+do
+echo "java -jar  /sw/bioinfo/snpEff/4.3t/bianca/SnpSift.jar extractFields -s \":\" -e \".\"  Manta_"$line"T_vs_"$line"N_somaticSV_snpEff_VEP.ann.vcf CHROM  POS     ID      REF ALT QUAL FILTER BND_DEPTH CIEND CIGAR CIPOS CSQ END EVENT HOMLEN HOMSEQ IMPRECISE INFO INV3 INV5 JUNCTION_SOMATICSCORE LOF MATEID MATE_BND_DEPTH SOMATIC SOMATICSCORE SVINSLEN SVINSSEQ SVLEN SVTYPE ANN[*].EFFECT EFF[*].GENE >Manta_"$line"T_vs_"$line"N_somaticSV_snpEff_VEP.ann.table &" >>Create_tables_Manta.sh
+done<vcf.files
+```
+
+Extracting insert-size distribution per sample  
+```{bash , eval = F}
+while read line
+do
+  echo "samtools view -q 40 -f66 /proj/sens2019505/nobackup/output/${line}/Preprocessing/Recalibrated/${line}T.recal.bam chr1:20000000-21000000 | awk '(\$9>=0){OFS=\"\\t\";print \$3,\$4,\$9}' >${line}_IS_T.coords"
+  echo "samtools view -q 40 -f66 /proj/sens2019505/nobackup/output/${line}/Preprocessing/Recalibrated/${line}N.recal.bam chr1:20000000-21000000 | awk '(\$9>=0){OFS=\"\\t\";print \$3,\$4,\$9}' >${line}_IS_N.coords"
+done<vcf.files
+```
+
+Extract coordinates of bridging reads  
+```{bash, eval = F}
+#Extract 
+samtools view -q 40  /proj/sens2019505/nobackup/output/204/Preprocessing/Recalibrated/204T.recal.bam chr2:113230000-113300000 | awk '($7 != "="){OFS="\t";print $3,$4,$7,$8}' | sed 's/chr//g' >204T_chr2_113.23_113.3_Bridging_q_40.coords
+samtools view -q 40  /proj/sens2019505/nobackup/output/205/Preprocessing/Recalibrated/205T.recal.bam chr2:113230000-113300000 | awk '($7 != "="){OFS="\t";print $3,$4,$7,$8}' | sed 's/chr//g' >205T_chr2_113.23_113.3_Bridging_q_40.coords
+
+samtools view -q 40  /proj/sens2019505/nobackup/output/204/Preprocessing/Recalibrated/204N.recal.bam chr2:113230000-113300000 | awk '($7 != "="){OFS="\t";print $3,$4,$7,$8}' | sed 's/chr//g' >204N_chr2_113.23_113.3_Bridging_q_40.coords
+samtools view -q 40  /proj/sens2019505/nobackup/output/205/Preprocessing/Recalibrated/205N.recal.bam chr2:113230000-113300000 | awk '($7 != "="){OFS="\t";print $3,$4,$7,$8}' | sed 's/chr//g' >205N_chr2_113.23_113.3_Bridging_q_40.coords
+
+
+```
+
+## Loading files to R for visualisation
+Generating distribution of stats
+```{r, eval = F}
+library(knitr)
+library(ggplot2)
+library(data.table)
+library(circlize)
+library(ComplexHeatmap)
+my.path <- '~/merged_results/Manta/'
+data.path <- '/proj/sens2019505/nobackup/nima/merged_results/Manta/'
+samples <- read.table(paste0(my.path,'vcf.files'),header=F)
+# samples <- as.data.frame(samples[order(samples[,1]),])
+my_stats <- c('QUAL', 'FILTER', 'BND_DEPTH', 'HOMLEN', 'IMPRECISE' , 'JUNCTION_SOMATICSCORE', 'MATE_BND_DEPTH', 'SOMATIC', 'SOMATICSCORE', 'SVINSLEN', 'SVLEN', 'SVTYPE')
+columns <- c('CHROM', 'POS', 'ID', 'REF', 'ALT', 'QUAL', 'FILTER', 'BND_DEPTH', 'CIEND', 'CIGAR', 'CIPOS', 'CSQ', 'END', 'EVENT', 'HOMLEN', 'HOMSEQ', 'IMPRECISE', 'INV3', 'INV5', 'JUNCTION_SOMATICSCORE', 'LOF', 'MATEID', 'MATE_BND_DEPTH', 'SOMATIC', 'SOMATICSCORE', 'SVINSLEN', 'SVINSSEQ', 'SVLEN', 'SVTYPE', 'ANN_EFFECT', 'EFF_GENE')
+
+my_list <- list()
+for(i in 1:nrow(samples)){
+  sample <- as.character(samples[i,1])
+  cat('\r',paste0('Loading sample:',sample,'....'))
+  tmp_data <- fread(paste0(data.path,'Manta_',sample,'T_vs_',sample,'N_somaticSV_snpEff_VEP.ann.table'),header = F, stringsAsFactors = FALSE, skip = 1)
+  colnames(tmp_data) <- columns
+  ##Labling variants wihtout IDs by CHROM_POS
+  tmp_data$Coord_ID <- paste0(tmp_data$CHROM, ':',tmp_data$POS)
+  tmp_list <- list(tmp_data)
+  my_list <- append(my_list,tmp_list)
+}
+names(my_list) <- samples[,1]
+
+##Create a table with all stats
+my_stats_df <- data.frame(matrix(0,ncol = length(my_stats),nrow=1))     
+colnames(my_stats_df) <- my_stats
+my_stats_df <- my_stats_df[FALSE,]
+for(i in 1:nrow(samples)){
+  sample <- as.character(samples[i,1])
+  cat('\r',paste0('Loading sample:',sample,'....'))
+  tmp_data <- my_list[[as.character(samples[i,1])]]
+  my_stats_df <- rbind.data.frame(my_stats_df, subset(tmp_data, select = my_stats))
+}
+#Printing number of FILTER terms
+kable(table(my_stats_df$FILTER))
+
+tmp_FILTER <- as.character(my_stats_df$FILTER)
+my_stats_df_PASS_MinSomaticScore <- my_stats_df[which(tmp_FILTER %in% c('PASS', 'MinSomaticScore')),]
+my_stats_df_MinSomaticScore <- my_stats_df[which(tmp_FILTER %in% c('MinSomaticScore')),]
+my_stats_df_PASS <- my_stats_df[which(tmp_FILTER %in% c('PASS')),]
+my_stats_df[ grep(pattern = 'PASS || MinSomaticScore', tmp_FILTER),])
+
+pdf('Stats.pdf', width = 10, height = 7)
+for(i in 3:length(my_stats)){
+  print(i)
+  p <- ggplot(my_stats_df_PASS_MinSomaticScore, aes(as.numeric(my_stats_df_PASS_MinSomaticScore[,my_stats[i]]), fill = FILTER)) + geom_histogram(show.legend = T) + labs (x = my_stats[i], title = my_stats[i]) #+  scale_fill_manual(values = c(x = "red", y = "blue"))
+  print(p)
+}
+
+
+#SOMATICSCORE vs BND_DEPTH
+p <- ggplot(my_stats_df_PASS_MinSomaticScore, aes(as.numeric(my_stats_df_PASS_MinSomaticScore$SOMATICSCORE), BND_DEPTH)) + geom_point(aes(col = as.factor(FILTER), shape = as.factor(SVTYPE))) + labs (x = 'SOMATICSCORE', y = 'BND_DEPTH', title = 'SOMATICSCORE vs BND_DEPTH')
+print(p)
+
+#FILTER = MinSomaticScore; IMPRECISE
+p <- ggplot(my_stats_df_MinSomaticScore, aes(as.numeric(my_stats_df_MinSomaticScore$SOMATICSCORE), BND_DEPTH)) + geom_point(aes(col = as.factor(IMPRECISE), shape = as.factor(SVTYPE) )) + labs (x = 'SOMATICSCORE', y = 'BND_DEPTH', title = 'SOMATICSCORE vs BND_DEPTH only in FILTER = MinSomaticScore')
+print(p)
+
+#FILTER = PASS and MinSomaticScore; IMPRECISE
+p <- ggplot(my_stats_df_PASS, aes(as.numeric(my_stats_df_PASS$SOMATICSCORE), BND_DEPTH)) + geom_point(aes(col = as.factor(IMPRECISE), shape = as.factor(SVTYPE))) + labs (x = 'SOMATICSCORE', y = 'BND_DEPTH', title = 'SOMATICSCORE vs BND_DEPTH in FILTER = PASS')
+print(p)
+
+#FILTER = MinSomaticScore BND_DEPTH distribution; IMPRECISE
+p <- ggplot(my_stats_df_MinSomaticScore, aes(as.numeric(my_stats_df_MinSomaticScore$BND_DEPTH), fill = IMPRECISE)) +
+  geom_histogram(show.legend = T) + labs (x = 'BND_DEPTH', title = 'BND_DEPTH distribution in FILTER = MinSomaticScore')
+print(p)
+
+#FILTER = PASS BND_DEPTH distribution; IMPRECISE
+p <- ggplot(my_stats_df_PASS, aes(as.numeric(my_stats_df_PASS$BND_DEPTH), fill = IMPRECISE)) +
+  geom_histogram(show.legend = T) + labs (x = 'BND_DEPTH', title = 'BND_DEPTH distribution in FILTER = PASS')
+print(p)
+
+dev.off()
+
+
+
+##Extract list of PASS + IMPRECISE = FALSE
+PASS_PRECISE <- data.frame(matrix(0,ncol = ncol(my_list[[1]])+1,nrow=1))     
+colnames(PASS_PRECISE) <- c(colnames(my_list[[1]]), 'Sample')
+PASS_PRECISE <- PASS_PRECISE[FALSE,]
+for(i in 1:nrow(samples)){
+  sample <- as.character(samples[i,1])
+  cat('\r',paste0('Loading sample:',sample,'....'))
+  tmp_data <- my_list[[as.character(samples[i,1])]]
+  print(nrow(tmp_data))
+  tmp_data <- tmp_data[(tmp_data$FILTER == 'PASS' & tmp_data$IMPRECISE == 'FALSE'),]
+  tmp_data <- tmp_data[order(tmp_data$SOMATICSCORE, decreasing = T),]
+  tmp_data$Sample <- sample
+  PASS_PRECISE <- rbind.data.frame(PASS_PRECISE, tmp_data)
+}
+write.table(PASS_PRECISE,'PASS_PRECISE_ALL_SVTYPES.txt', col.names = T, row.names = F, sep = '\t', quote = F)
+gene_fusion <- PASS_PRECISE[grep('gene_fusion',PASS_PRECISE$ANN_EFFECT),]
+#Extracting unique EFF_GENE
+gene_fusion <- distinct(gene_fusion, EFF_GENE, .keep_all= TRUE)
+
+gene_fusion[grep('MantaBND', gene_fusion$ID,invert = T),'ALT'] <- paste0(gene_fusion[grep('MantaBND', gene_fusion$ID,invert = T), 'CHROM'], ':', gene_fusion[grep('MantaBND', gene_fusion$ID,invert = T), 'END'])
+# gene_fusion <- gene_fusion[grep('MantaBND',gene_fusion$ID),]
+Clean_ALT <- gsub(pattern = ".*\\](.*)\\].*", replacement = "\\1", gsub(pattern = ".*\\[(.*)\\[.*" , replacement="\\1", x = gene_fusion[,'ALT']))
+gene_fusion$ALT_Chr <- unlist(strsplit(x = Clean_ALT, split = ":"))[seq(1,length = nrow(gene_fusion), by =2)]
+gene_fusion$ALT_POS <- unlist(strsplit(x = Clean_ALT, split = ":"))[seq(1,nrow(gene_fusion))*2]
+gene_fusion$ID_Category <- gsub(':.*', '', gene_fusion$ID)
+color <- data.frame(ID_Category = c('MantaBND', 'MantaDUP', 'MantaINV', 'MantaDEL'), Col = c('#d7191c', '#fdae61', '#a6d96a', '#1a9641'))
+gene_fusion <- merge(gene_fusion, color, by = 'ID_Category')
+
+gene_fusion_start <- data.frame(Chr = as.character(gene_fusion$CHROM), Start = gene_fusion$POS-1, End = gene_fusion$POS, ID = gene_fusion$ID)
+gene_fusion_end <- data.frame(Chr = gsub('CHR', 'chr',as.character(gene_fusion$ALT_Chr)), Start = as.numeric(gene_fusion$ALT_POS)-1, End = as.numeric(gene_fusion$ALT_POS), ID = gene_fusion$ID)
+gene_fusion_start <- cbind.data.frame(gene_fusion$CHROM, gene_fusion$POS-1, gene_fusion$POS, gene_fusion$ID)
+gene_fusion_end <- cbind.data.frame(gsub('CHR', 'chr',gene_fusion$ALT_Chr), as.numeric(gene_fusion$ALT_POS)-1, as.numeric(gene_fusion$ALT_POS), gene_fusion$ID)
+
+##Plotting
+pdf('High_quality_chr_rearrangements_V2_gene_fusion.pdf', width=10, height=10)
+circos.clear() # to make sure nothing is in the workspace that you dont want
+circos.par("start.degree" = 90, gap.degree=3)
+# this makes it start with chr1 at 12 o’clock and with a little bit of gap between the chromosomes
+# circos.initializeWithIdeogram(plotType = c("labels", "axis"), chromosome.index = paste0("chr", c(1:22)), species = 'hg19')
+circos.initializeWithIdeogram(chromosome.index = paste0("chr", c(1:22, 'X')), species = 'hg19')
+# by adding the plotType= you take away the little ideogram, if you remove it it automatically adds it directly, 
+# i just remembered this is what i did to make the labels correctly, taking away the ideogram here, and adding it separately later
+# circos.genomicLabels(markerlabels, labels.column=4, side="outside", cex=0.5) 
+# a bed file with positions and an extra column with the labels, label.column is just which column it should take info from
+# circos.genomicIdeogram(track.height = 0.05) # the ideogram, track height is how “broad” the track should be.
+circos.genomicLink(gene_fusion_start, gene_fusion_end, col = gene_fusion$Col)
+# these are the links, a bed file with where the line should start, and a matched one with where it should end. directional=1 for arrows
+# here you can play around with the transparency (transparency =) of the colors, the colors themselves and other customizations.
+# this is how i made the highlights: 
+# highlight.chromosome("chr1", col=NA, track.index=4, border="#d81324", lwd=2) # col=NA for not filling, and border for border. 
+# Track index to just have a border around the ideogram in my case
+title('High quality chromosomal re-arrangements resulting into gene_fusion')
+
+
+lgd_lines = Legend(at = 1:3, labels = c("Translocation", "Deletion", "Duplication", "Inversion"), type = "lines",legend_gp = gpar(col = c('#a6d96a', 'black', 'blue', 'red')), title_position = "topleft", title = 'SV')
+draw(lgd_lines, x = unit(4, "mm"), y = unit(4, "mm"), just = c("left", "bottom"))
+dev.off()
+
+MinSomaticScore_PRECISE <- data.frame(matrix(0,ncol = ncol(my_list[[1]])+1,nrow=1))     
+colnames(MinSomaticScore_PRECISE) <- c(colnames(my_list[[1]]), 'Sample')
+MinSomaticScore_PRECISE <- MinSomaticScore_PRECISE[FALSE,]
+for(i in 1:nrow(samples)){
+  sample <- as.character(samples[i,1])
+  cat('\r',paste0('Loading sample:',sample,'....'))
+  tmp_data <- my_list[[as.character(samples[i,1])]]
+  print(nrow(tmp_data))
+  tmp_data <- tmp_data[(tmp_data$FILTER == 'MinSomaticScore' & tmp_data$IMPRECISE == 'FALSE'),]
+  tmp_data <- tmp_data[order(tmp_data$SOMATICSCORE),]
+  tmp_data$Sample <- sample
+  MinSomaticScore_PRECISE <- rbind.data.frame(MinSomaticScore_PRECISE, tmp_data)
+}
+
+```
+
+
+# Manta
+Manta: Analysing calls from Manta and plotting  
+```{r Analysing_calls_from_Manta, eval=FALSE}
+library(knitr)
+library(ggplot2)
+library(data.table)
+my.path <- '/proj/sens2019505/nobackup/nima/merged_results/Manta/' 
+samples <- read.table(paste0(my.path,'vcf.files'),header=F)
+# samples <- as.data.frame(samples[order(samples[,1]),])
+my_stats <- c("QUAL", "FILTER", "BND_DEPTH", "CIEND", "CIGAR", "CIPOS", "CSQ", "END", "EVENT", "HOMLEN", "HOMSEQ", "IMPRECISE", "INV3", "INV5", "JUNCTION_SOMATICSCORE", "LOF", "MATEID", "MATE_BND_DEPTH", "SOMATIC", "SOMATICSCORE", "SVINSLEN", "SVINSSEQ", "SVLEN", "SVTYPE","EFFECT", "GENE")
+
+my_list <- list()
+for(i in 1:nrow(samples)){
+  sample <- as.character(samples[i,1])
+  cat('\r',paste0('Loading sample:',sample,'....'))
+  tmp_data <- fread(paste0(my.path,'Manta_',sample,'T_vs_',sample,'N_somaticSV_snpEff_VEP.ann.table'),header = F, stringsAsFactors = FALSE, skip = 1)
+  colnames(tmp_data) <- c('CHROM','POS', 'ID', 'REF', 'ALT', my_stats)
+  ##Labling variants wihtout IDs by CHROM_POS
+  tmp_data$Coord_ID <- paste0(tmp_data$CHROM, ':',tmp_data$POS)
+  tmp_list <- list(tmp_data)
+  my_list <- append(my_list,tmp_list)
+}
+names(my_list) <- samples[,1]
+
+##Effect count table for all samples
+mutation_list <- unique(unlist(lapply(EFF_GENE, function(x) x[[2]])))
+tmp_EFF_count <- lapply(names(EFF_GENE), function(x) table(EFF_GENE[[x]][,'EFFECT']))
+names(tmp_EFF_count) <- samples[,1]
+EFF_count_table <- data.frame(matrix(0, nrow = length(mutation_list), ncol = nrow(samples)))
+colnames(EFF_count_table) <- samples[,1]
+rownames(EFF_count_table) <- mutation_list
+for(g in 1:length(mutation_list)){
+  for(i in 1:nrow(samples)){
+  tmp_list <- as.data.frame(tmp_EFF_count[[as.character(samples[i,1])]])
+  rownames(tmp_list) <- tmp_list[,1]
+  EFF_count_table[as.character(mutation_list[g]),as.character(samples[i,1])] <- tmp_list[as.character(mutation_list[g]),'Freq']
+  }
+}
+EFF_count_table <- EFF_count_table[order(rownames(EFF_count_table)),]
+EFF_count_table['SUM',] <- colSums(EFF_count_table,na.rm=T)
+mutation_list <- mutation_list[mutation_list != "."] 
+
+##Genes effect count table for all samples
+genes_list <- data.frame(GENE = unique(as.character(unlist(strsplit(as.character(unlist(lapply(EFF_GENE, function(x) x[[3]]))), '\\.')))))
+All_Genes_EFF_count_table <- data.frame(matrix(0, nrow = nrow(genes_list), ncol = length(mutation_list)))
+colnames(All_Genes_EFF_count_table) <- as.character(mutation_list)
+rownames(All_Genes_EFF_count_table) <- as.character(genes_list$GENE)
+All_Genes_EFF_count_table$Gene <- as.character(genes_list$GENE)
+ $Sum <- 0
+for(i in 1:nrow(samples)){
+  cat('\r :', samples[i,1])
+  tmp_list <- as.data.frame(EFF_GENE[[as.character(samples[i,1])]])
+  tmp_list <- tmp_list[(tmp_list$GENE %in% genes_list$GENE),]
+  for(r in 1:nrow(tmp_list)){
+    cat('\r :', (nrow(tmp_list) - r)*100/nrow(tmp_list))
+    All_Genes_EFF_count_table[(All_Genes_EFF_count_table$Gene == as.character(tmp_list$GENE[r])),as.character(tmp_list$EFFECT[r])] <- All_Genes_EFF_count_table[(All_Genes_EFF_count_table$Gene == as.character(tmp_list$GENE[r])),as.character(tmp_list$EFFECT[r])] + 1
+  }
+}
+
+#Here we select a subset of the mutations as damaging mutations 
+Mutations_to_sum <- c("disruptive_inframe_deletion", "conservative_inframe_insertion", "conservative_inframe_deletion", "disruptive_inframe_insertion", "missense_variant", "synonymous_variant", "frameshift_variant", "stop_gained", "start_lost")
+All_Genes_EFF_count_table$Sum_all <- rowSums(All_Genes_EFF_count_table[,1:32])
+All_Genes_EFF_count_table$Sum_selected <- rowSums(All_Genes_EFF_count_table[,Mutations_to_sum])
+All_Genes_EFF_count_table$Mutation_frac <- All_Genes_EFF_count_table$Sum_selected*100/All_Genes_EFF_count_table$Sum_all
+#All_Genes_EFF_count_table_selected <- All_Genes_EFF_count_table[(as.numeric(All_Genes_EFF_count_table$Sum_selected) >= 5),]
+# All_Genes_EFF_count_table_selected <- rbind.data.frame(All_Genes_EFF_count_table_selected,All_Genes_EFF_count_table[(All_Genes_EFF_count_table$Gene %in% genes_of_interest$Gene),]) 
+
+##Stats of annotated mutation
+my.path <- '/proj/sens2019505/nobackup/nima/merged_results/Mutect2/PON/'
+All_Genes_EFF_count_table <- read.table(paste0(my.path, 'All_Genes_EFF_count_table.txt'), header = T, row.names = 1)
+labs <- colnames(All_Genes_EFF_count_table[1:25])
+labs <- gsub('conservative_', 'cons_', gsub('protein_protein', 'prot_prot', gsub('disruptive_','dis_',gsub('_gene', '', gsub('_variant','', labs)))))
+labs <- gsub('conservative_', 'cons_', gsub('protein_protein', 'prot_prot', gsub('disruptive_','dis_',gsub('_gene', '', gsub('_variant','', labs)))))
+labs[7] <- 'non_coding_exon'
+labs[15] <- '5_UTR_premature_start_gain'
+labs[15] <- '5_UTR_premature_start_gain'
+labs[13] <- '5_UTR'
+labs[18] <- 'stop_gained'
+labs[8] <- '3_UTR'
+pdf('All_Genes_EFF_count_distribution_20201125.pdf', width = 10, height = 7)
+par(cex.axis=0.7)
+par(mar=c(12,4,4,2))
+boxplot(All_Genes_EFF_count_table[,1:25], ylim = c(0,200), cex = 0.5, bty = 'n', xaxt = 'n')
+axis(side = 1, at=1:25, labels= labs, las = 2)
+dev.off()
+##
+
+
+##Heatmap of mutations for genes of interest
+#Select genes from Mutsig results
+Mutsig <- read.csv('/castor/project/proj_nobackup/output/MutSig2CV/hg19/sig_genes.txt', header = T, sep='\t')
+genes_of_interest <- as.character(Mutsig$gene[1:20])
+All_Genes_EFF_count_table_selected <- All_Genes_EFF_count_table[(All_Genes_EFF_count_table$Gene %in% genes_of_interest$Gene),]
+All_Genes_EFF_count_table_selected <- All_Genes_EFF_count_table_selected[order(All_Genes_EFF_count_table_selected$Mutation_frac, decreasing = F),]
+
+
+# genes_of_interest <- c('NRAS','KRAS', 'TP53', 'PIK3CA', 'PTEN','TERT')
+Genes_EFF_count_table <- data.frame(matrix(NA, nrow = nrow(samples)*length(genes_of_interest), ncol = length(mutation_list)+2))
+colnames(Genes_EFF_count_table) <- c('Sample', 'GENE', as.character(mutation_list))
+Genes_EFF_count_table$Sample <- rep(samples[,1],length(genes_of_interest))
+Genes_EFF_count_table$GENE <- rep(genes_of_interest,nrow(samples))
+rownames(Genes_EFF_count_table) <- paste0(Genes_EFF_count_table$Sample,"_",Genes_EFF_count_table$GENE)
+for(g in 1:length(genes_of_interest)){
+  for(i in 1:nrow(samples)){
+    tmp_data <- EFF_GENE[[as.character(samples[i,1])]]
+    tmp_data <- tmp_data[(as.character(tmp_data$GENE) == genes_of_interest[g]),]
+    if(nrow(tmp_data)>0){
+      for(eff in as.character(tmp_data$EFFECT)){
+        Genes_EFF_count_table[(Genes_EFF_count_table$Sample == samples[i,1] & Genes_EFF_count_table$GENE == as.character(genes_of_interest[g])),eff] <- nrow(tmp_data[(tmp_data$EFFECT == eff),])
+      }
+    }
+  }
+}
+ 
+colnames(Genes_EFF_count_table) <- gsub('_variant','',c('Sample', 'GENE', as.character(mutation_list)))
+
+Genes_EFF_count_table <- Genes_EFF_count_table[,colSums(is.na(Genes_EFF_count_table))<nrow(Genes_EFF_count_table)] #select columns with counts
+Genes_EFF_count_table <- Genes_EFF_count_table[rowSums(is.na(Genes_EFF_count_table))<ncol(Genes_EFF_count_table)-2,] #select rowscolumns with counts
+Genes_EFF_count_table[is.na(Genes_EFF_count_table)] <- 0
+
+##In ordere to plot only existence of any mutations (regardless of #mutations)
+library(reshape2)
+# genes_of_interest <- c('NRAS','KRAS', 'TP53', 'PIK3CA', 'PTEN','TERT')
+#Genes_EFF_count_table <- data.frame(matrix(NA, nrow = nrow(samples)*length(genes_of_interest), ncol = length(mutation_list)+2))
+#colnames(Genes_EFF_count_table) <- c('Sample', 'GENE', as.character(mutation_list))
+# Genes_EFF_count_table$Sample <- rep(samples[,1],length(genes_of_interest))
+Genes_EFF_count_table <- data.frame(matrix(NA, nrow = nrow(samples)*length(as.character(genes_of_interest)), ncol = length(mutation_list)+2))
+colnames(Genes_EFF_count_table) <- c('Sample', 'GENE', as.character(mutation_list))
+Genes_EFF_count_table$GENE <- rep(as.character(genes_of_interest),nrow(samples))
+Genes_EFF_count_table$Sample <- rep(samples[,1],length(as.character(genes_of_interest)))
+rownames(Genes_EFF_count_table) <- paste0(Genes_EFF_count_table$Sample,"_",Genes_EFF_count_table$GENE)
+for(g in 1:length(genes_of_interest)){
+  for(i in 1:nrow(samples)){
+    tmp_data <- EFF_GENE[[as.character(samples[i,1])]]
+    tmp_data <- tmp_data[(as.character(tmp_data$GENE) == genes_of_interest[g]),]
+    if(nrow(tmp_data)>0){
+      for(eff in as.character(tmp_data$EFFECT)){
+        Genes_EFF_count_table[(Genes_EFF_count_table$Sample == samples[i,1] & Genes_EFF_count_table$GENE == as.character(genes_of_interest[g])),eff] <- nrow(tmp_data[(tmp_data$EFFECT == eff),])
+      }
+    }
+  }
+}
+ 
+colnames(Genes_EFF_count_table) <- gsub('_variant','',c('Sample', 'GENE', as.character(mutation_list)))
+Genes_EFF_count_table <- Genes_EFF_count_table[,colSums(is.na(Genes_EFF_count_table))<nrow(Genes_EFF_count_table)] #select columns with counts
+Genes_EFF_count_table <- Genes_EFF_count_table[order(Genes_EFF_count_table$GENE, Genes_EFF_count_table$Sample),] #Ordering the data,frame by both  GENE and Samples
+
+
+#Replacing NAs with zero and non-NA with cntr
+cntr <- 1
+for(col in 3:ncol(Genes_EFF_count_table)){
+  tmp <- Genes_EFF_count_table[,col]
+  tmp[!is.na(tmp) > 0 ] <- letters[cntr]
+  tmp[tmp == 0] <- "!"
+  tmp[is.na(tmp)] <- "!"
+  Genes_EFF_count_table[,col] <- tmp
+  cntr <- cntr + 1
+}
+
+
+## Creating CODEs for each gene to represent all the observed mutations in given gene
+tmp <- Genes_EFF_count_table[,3:ncol(Genes_EFF_count_table)]
+tmp$mutations_code <- 'NA'
+for(rw in 3:nrow(tmp)){
+  tmp$mutations_code[rw] <- (paste0(tmp[rw,3:ncol(tmp)], collapse=""))
+}
+Genes_EFF_count_table <- cbind.data.frame(Genes_EFF_count_table[,1:2],tmp)
+
+
+Genes_mutations_code <- data.frame(matrix('NA', nrow = nrow(samples), ncol = length(genes_of_interest)))
+colnames(Genes_mutations_code) <- genes_of_interest
+rownames(Genes_mutations_code) <- samples[,1]
+for(g in genes_of_interest){
+  Genes_mutations_code[,g] <- Genes_EFF_count_table[(as.character(Genes_EFF_count_table$GENE) == g),'mutations_code']
+}
+key_code <- as.data.frame(cbind.data.frame(mutation_code = sort(as.data.frame(table(unlist(Genes_mutations_code)))[,1], decreasing=T), factor_code=seq(0,7,1))) 
+key_code[1,2] <- 7
+
+for(my.char in 1:nrow(key_code)){
+  Genes_mutations_code[which(Genes_mutations_code == as.character(key_code[my.char,1]), arr.ind= T)] <- key_code[my.char,2]
+}
+
+Genes_mutations_code <- as.matrix(matrix(as.integer(unlist(Genes_mutations_code)),13,6))
+colnames(Genes_mutations_code) <- genes_of_interest
+rownames(Genes_mutations_code) <- samples[,1]
+my.col <- c('#7fc97f','#beaed4','#fdc086','#ffff99','#386cb0','#f0027f','#bf5b17')
+# pdf('Mutations_count_genes_of_interest.pdf', width=10, height=10)
+pdf('Mutations_count_genes_of_interest_MutSig_20.pdf', width=10, height=10)
+heatmap.2(t(Genes_mutations_code), dendrogram='none', Rowv=FALSE, Colv=FALSE, scale="none", density.info="none", trace="none", key=TRUE, keysize=1.2, cexCol=0.8, margins=c(5,10), labRow = colnames(Genes_mutations_code), main='Mutations', col = my.col)
+dev.off()
+
+
+pdf('Mutation_fraction_genes_of_itnerest.pdf', width=10, height=10)
+barplot(t(as.data.frame(All_Genes_EFF_count_table_selected[genes_of_interest,c('Mutation_frac')])),names.arg = All_Genes_EFF_count_table_selected[,c('Gene')], las = 1, horiz = T, cole = 'lightblue', main = 'Mutation fraction')
+dev.off()
+
+##Print table 
+kable(Genes_EFF_count_table)
+
+par(cex.main=0.5)
+heatmap.2(as.matrix(Genes_EFF_count_table[,3:ncol(Genes_EFF_count_table)]), dendrogram='none', Rowv=FALSE, Colv=FALSE, scale="none", density.info="none", trace="none", key=TRUE, keysize=1.2, cexCol=0.8, margins=c(8,8), labRow = rownames(Genes_EFF_count_table), main='Count of mutation type count top six candidate genes', , na.color = 'black', col = c('black','#d73027', '#fc8d59', '#fee090', '#e0f3f8', '#91bfdb', '#4575b4'))
+##Printing the table 
+kable(EFF_count_table)
+
+
+##Clinical data visualisation
+clinical_data_numeric <- data.frame(WHO_2017 = as.numeric(clinical_data$WHO_2017), Onkocytar = as.numeric(clinical_data$Onkocytar), Stadium_AJCC_TNM_v8 = as.numeric(clinical_data$Stadium_AJCC_TNM_v8), Size = clinical_data$Size, AJCC_Stage_Diagnosis = as.numeric(clinical_data$AJCC_Stage_Diagnosis), AJJC_Stage_followup = as.numeric(clinical_data$AJJC_Stage_followup), Age_at_operation = clinical_data$Age_at_operation, Sex = as.numeric(clinical_data$Sex), Status_category = as.numeric(clinical_data$Status_category), Relapse = as.numeric(clinical_data$Replase), Local_Metastas = as.numeric(clinical_data$Local_metastas))
+
+layout(matrix(c(1,2,3,4,5,6,7,8,9,10), 10, 1, byrow = TRUE), heights = c(50,20,20,10,10,10,10,10,10,10,10))
+plot_df <- (as.data.frame(EFF_count_table[c('missense_variant', 'synonymous_variant'),]))
+barplot(as.matrix(plot_df), col = c('blue', 'darkgreen'), xlab = 'Samples', cex.names = 0.8, ylab = 'Frequency')
+legend(x = 'topright', legend = c('Missense','Synonymous'), col = c('blue', 'darkgreen'), fill = c('blue', 'darkgreen'), bty = 'n')
+
+##Plot Size
+par(mar = c(0, 4, 3, 2))
+barplot(clinical_data$Size, ylab = 'Size', cex.names=0.5)
+
+##Plot Age by Sex
+par(mar = c(0, 4, 3, 2))
+barplot(clinical_data$Age_at_operation,col = as.factor(clinical_data$Sex), ylab = 'Age (M=red,F=black)', cex.names=0.5)
+
+##Plot Status_category
+par(mar = c(0, 4, 3, 2))
+tst <- clinical_data_numeric$Status_category
+ind1 <- as.numeric(tst == 1)
+ind2 <- as.numeric(tst == 2)
+ind3 <- as.numeric(tst == 3)
+barplot(t(cbind.data.frame(Dead = ind1, AWD = ind2, AWOD = ind3)),col = c('red','blue','green'),axes = F, ylab ='Sta_cat', cex.names = 0.6)
+
+##Plot Relapse
+par(mar = c(0, 4, 3, 2))
+tst <- clinical_data_numeric$Relapse
+ind1 <- as.numeric(tst == 1)
+ind2 <- as.numeric(tst == 2)
+barplot(t(cbind.data.frame(Relapse_Y = ind1, Relapse_N = ind2)),col = c('yellow','lightblue'),axes = F, ylab = 'Relapse', cex.names = 0.6)
+
+##Plot WHO_2017
+par(mar = c(0, 4, 3, 2))
+tst <- clinical_data_numeric$WHO_2017
+ind1 <- as.numeric(tst == 1)
+ind2 <- as.numeric(tst == 2)
+barplot(t(cbind.data.frame(Relapse_Y = ind1, Relapse_N = ind2)),col = c('darkorchid','forestgreen'),axes = F, ylab = 'WHO_17', cex.names = 0.6)
+
+##Plot Onkocytar
+par(mar = c(0, 4, 3, 2))
+tst <- clinical_data_numeric$Onkocytar
+ind1 <- as.numeric(tst == 1)
+ind2 <- as.numeric(tst == 2)
+barplot(t(cbind.data.frame(Relapse_Y = ind1, Relapse_N = ind2)),col = c('deeppink','khaki3'),axes = F, ylab = 'Onkocytar', cex.names = 0.6)
+
+##Plot Stadium_AJCC_TNM_v8
+par(mar = c(0, 4, 3, 2))
+tst <- clinical_data_numeric$Stadium_AJCC_TNM_v8
+ind1 <- as.numeric(tst == 1)
+ind2 <- as.numeric(tst == 2)
+ind3 <- as.numeric(tst == 3)
+ind4 <- as.numeric(tst == 4)
+barplot(t(cbind.data.frame(pT1b = ind1, pT2 = ind2, pT3a = ind3, pT3b = ind4)),col = c('mediumvioletred','salmon4','seagreen2','slategray'),axes = F, ylab = 'TNM_v8', cex.names = 0.6)
+
+##Plot AJCC_Stage_Diagnosis
+par(mar = c(0, 4, 3, 2))
+tst <- clinical_data_numeric$AJCC_Stage_Diagnosis
+ind1 <- as.numeric(tst == 1)
+ind2 <- as.numeric(tst == 2)
+ind3 <- as.numeric(tst == 3)
+barplot(t(cbind.data.frame(I = ind1, II = ind2, IVB = ind3)),col = c('lightblue','blue','red'),axes = F, ylab ='Diagnosis', cex.names = 0.6)
+
+
+##Plot AJJC_Stage_followup
+par(mar = c(0, 4, 3, 2))
+tst <- clinical_data_numeric$AJJC_Stage_followup
+ind1 <- as.numeric(tst == 1)
+ind2 <- as.numeric(tst == 2)
+ind3 <- as.numeric(tst == 3)
+barplot(t(cbind.data.frame(I = ind1, II = ind2, IVB = ind3)),col = c('lightblue','blue','red'),axes = F, ylab ='followup', cex.names = 0.6)
+```
+
+
+# ASCAT  
+First, cnvs will be intersected with cytoband files  
+```{bash, eval = F}
+module load bioinfo-tools BEDTools
+while read line
+do
+#  echo "intersectBed -wa -wb -a $line/${line}T.cnvs.txt -b cytoBand_arm_number.bed |  sed 's/p.*/p/' | sed 's/q.*/q/' | awk '{OFS=\"\\t\";print \$1\"_\"\$2\"_\"\$3,\$1,\$2,\$3,\$4,\$5,\$1\$9}' | sort -k1,1 -u | cut -f2-7 | sort -k1,1 -k2n,2 >${line}T_cytoband.bed"
+  echo "intersectBed -wa -wb -a $line/${line}T.cnvs.txt -b cytoBand_arm_number.bed |  awk '{OFS=\"\\t\";print \$1\"_\"\$2\"_\"\$3,\$1,\$2,\$3,\$4,\$5,\$1\$9}' | sort -k1,1 -u | cut -f2-7 | sort -k1,1 -k2n,2 >${line}T_cytoband.bed"
+done<vcf.files
+```
+
+Multipanel plot for CNAs by Count  
+```{r, eval=FALSE}
+# library(IRanges)
+library(GenomicRanges)
+library(reshape2)
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(cowplot)
+library(egg)
+my.path <- '/proj/sens2019505/nobackup/nima/merged_results/ASCAT/'
+samples <- read.table(paste0(my.path,'vcf.files'),header=F)
+samples <- as.data.frame(samples[order(samples[,1]),])
+clinical_data <- read.table('/proj/sens2019505/nobackup/nima/merged_results/Clinical_data.txt', header = T)
+cytoband <- read.table(paste0(my.path,'cytoBand_arm_number.bed'),header=F,fill = T)
+colnames(cytoband) <- c('Chr', 'Start', 'End', 'Cytoband', 'Chr_Cytoband')
+# cytoband$Chr <- gsub('chr',replacement = '', x = as.character(cytoband$Chr))
+cytoband$Arm <- paste0(cytoband$Chr,substr(as.character(cytoband$Cytoband),1,1))
+cytoband$ID <- paste0(cytoband$Chr, '_', cytoband$Start, '_', cytoband$End)
+# cytoband <- cytoband[(as.numeric(cytoband$Chr) <=22 | cytoband$Chr == 'X' | cytoband$Chr == 'Y'),]
+#Creating Cytoband dataframe
+CNA_df <- matrix(NA,nrow = nrow(cytoband), ncol = nrow(samples)+1)
+colnames(CNA_df) <- c('Chr_Cytoband', samples[,1])
+CNA_df <- as.data.frame(CNA_df) 
+CNA_df$Chr_Cytoband <- cytoband$Chr_Cytoband
+
+my_list <- list()
+for(i in 1:nrow(samples)){
+  sample <- as.character(samples[i,1])
+  # tmp_data <- read.table(paste0(my.path,sample,'/',sample,'T.cnvs.txt'),header = T, stringsAsFactors = FALSE)
+  tmp_data <- read.table(paste0(my.path,sample,'T_cytoband.bed'),header = F, stringsAsFactors = FALSE)
+  colnames(tmp_data) <- c('chr', 'startpos', 'endpos', 'nMajor', 'nMinor', 'Chr_Cytoband')
+  tmp_data$ID <- paste0(tmp_data$chr, '_', tmp_data$startpos, '_', tmp_data$endpos) ##Create IDs
+  ##Read ploidy reported by ASCAT
+  tmp_ploidy <- read.table(paste0(my.path,sample,'/',sample,'T.purityploidy.txt'),header = T, stringsAsFactors = FALSE)[,2]
+  
+  ##Calculate data for GAIN/LOSS,....
+  tmp_data$CNA <- NA #Add a coulmn to save copy number abberation (Normal copies will be saved as NA)
+  tmp_data$SUM <- rowSums(tmp_data[,4:5]) #Sum nMajor and nMinor to create tot_number
+  tmp_data[(tmp_data$SUM == 0), 'SUM'] <- 0.15 #Replace zero values 
+  
+  ##Genotype Gain/Loss/Deletion
+  tmp_data[((tmp_data$SUM) > tmp_ploidy+ 0.6),'CNA'] <- 2 #Gain
+  tmp_data[((tmp_data$SUM) < tmp_ploidy- 0.6),'CNA'] <- 1 #Loss
+  tmp_data[((tmp_data$SUM) == 0.15),'CNA'] <- 1*-1 #Del
+  Neutral_freq <- as.numeric(as.vector(Neutral_freq <- as.data.frame(table(tmp_data[is.na(tmp_data$CNA),'SUM']))[1,1]))
+  tmp_data$LogR2 <- log2(tmp_data$SUM/2)
+  tmp_data$LogR_Neutral_Freq <- log2(tmp_data$SUM/Neutral_freq)
+  for(c in 1:nrow(CNA_df)){
+    cat('\r Cytoband:', as.character(CNA_df$Chr_Cytoband[c]))
+    tmp_CNA <- tmp_data[(as.character(tmp_data$Chr_Cytoband) == as.character(CNA_df$Chr_Cytoband[c])),]
+    #If there is only one row then report the mutation
+    if( nrow(tmp_CNA) == 1){
+      if(!is.na(tmp_CNA$CNA)){
+        CNA_df[c,as.character(samples[i,1])] <- tmp_CNA$CNA
+      }
+    }else{
+      if(nrow(tmp_CNA) > 1){
+        tmp_CNA <- tmp_CNA[!is.na(tmp_CNA$CNA),]
+        if(nrow(tmp_CNA)>=1){
+          freq_CNA <- as.data.frame(table(tmp_CNA$CNA))
+          CNA_df[c,as.character(samples[i,1])] <- as.character(freq_CNA[order(freq_CNA$Freq,decreasing = T),][1,'Var1'])
+        }
+      }
+    }
+  }
+  tmp_list <- list(tmp_data)
+  my_list <- append(my_list,tmp_list)
+}
+
+names(my_list) <- samples[,1]
+write.table(CNA_df, 'CNA_All_samples.txt', col.names = T, row.names = F, sep = '\t', quote = F)
+# CNA_df_numeric <- do.call(cbind.data.frame, as.numeric(CNA_df[,2:ncol(CNA_df)]))
+CNA_df_numeric <- as.numeric(CNA_df[,2])
+for(i in 3:ncol(CNA_df)){
+  CNA_df_numeric <- cbind.data.frame(CNA_df_numeric,as.numeric(CNA_df[,i]))
+}
+colnames(CNA_df_numeric) <- samples[,1]
+rownames(CNA_df_numeric) <- CNA_df$Chr_Cytoband
+CNA_df_numeric <- CNA_df_numeric[rowSums(is.na(CNA_df_numeric))<ncol(CNA_df_numeric),] #select columns with counts
+#Order by chromosome number
+CNA_df_numeric$Chr <- gsub("p.*|q.*", replacement="", perl=T, x=rownames(CNA_df_numeric))
+CNA_df_numeric <- CNA_df_numeric[order(as.numeric(CNA_df_numeric$Chr)),-14]
+
+# pdf(paste0(my.path,'CNA_All_samples.pdf'),width = 10, height = 7)
+# heatmap.2(as.matrix(CNA_df_numeric), dendrogram='none', Rowv=FALSE, Colv=FALSE, scale="none", density.info="none", trace="none", key=TRUE, keysize=1.2, cexCol=0.8, margins=c(8,8), labRow = as.character(rownames(CNA_df_numeric)), main='CNA', na.color = 'white', col = c('darkblue','lightblue', 'red'))
+# dev.off()
+
+CNA_df_numeric_t <- t(CNA_df_numeric)
+CNA_df_numeric_t <- cbind.data.frame(ID = colnames(CNA_df_numeric),CNA_df_numeric_t)
+CNA_df_numeric_melt <- melt(CNA_df_numeric_t, id.vars="ID")
+colnames(CNA_df_numeric_melt) <- c('ID','Cytoband','Mutation')
+CNA_df_numeric_melt[is.na(CNA_df_numeric_melt$Mutation),'Mutation'] <- 0
+
+#Barplot
+  CNA_df_numeric_t[is.na(CNA_df_numeric_t)] <- 0
+  Freq <- (table(c(col(CNA_df_numeric_t[2:300])), unlist(c(CNA_df_numeric_t[,2:300]))))
+  rownames(Freq) <- colnames(CNA_df_numeric_t[,2:300])
+  colnames(Freq) <- c('Deletion', 'No_Change', 'Loss', 'Gain')
+  Freq_melt <- melt(Freq[,c(1,3:4)])
+  colnames(Freq_melt) <- c('Cytoband', 'Mutation', 'Freq') 
+  Freq_melt$Chromosome <- gsub("p.*|q.*", replacement="", perl=T, x = as.character(Freq_melt$Cytoband))
+  # Freq_melt <- cbind.data.frame(rep(rownames(Freq),3,nrow(Freq)),melt(Freq[,c(1,3:4)]))
+ 
+  barplot <- ggplot(data=Freq_melt, aes(x=Cytoband, y=Freq, fill = Mutation)) + geom_bar(stat="identity") + scale_fill_manual(values=c('darkblue','lightblue', 'red')) + theme_classic() + 
+    theme(axis.title.x=element_blank(), axis.text.x=element_blank(),axis.ticks.x=element_blank(),
+          legend.position = "none")
+#axis.title.y = element_blank(), axis.text.y = element_blank(),axis.ticks.y = element_blank(),
+#Heatmap
+    heatmap <- qplot(x=Cytoband, y=ID, data=CNA_df_numeric_melt, fill=as.factor(Mutation), geom="tile") + scale_fill_manual(values = c('darkblue','gray95','lightblue', 'red'),labels = c('Deletion', 'No change', 'Loss','Gain'), guide_legend(title= 'CNA', guide_legend()))+ theme(axis.title.x = element_blank(),axis.text.x = element_blank(), axis.ticks.x = element_blank()) + theme(legend.position = "bottom")#+ labs(fill ="CNA")#;heatmap;dev.off()
+  heatmap.clean <- heatmap +
+      theme(legend.direction = "horizontal", axis.title.x = element_blank(),
+            axis.text.x = element_blank(), axis.ticks.x = element_blank(), legend.position="top")
+##Adding chromosome info to the plot
+  #Create matrix with values to plot chromosome with different color 
+  Chr_Chr_Cytoband <- cbind.data.frame(Chromosome = gsub("p.*|q.*", replacement="", perl=T, x=rownames(CNA_df_numeric)), Cytoband = rownames(CNA_df_numeric),Value = 1)
+  Chr_Chr_Cytoband <- Chr_Chr_Cytoband[order(as.numeric(as.character(Chr_Chr_Cytoband$Chromosome))),]
+   #Create table with alternate color for chromosomes (Gray, Black)
+   Chr_band_Col <- cbind.data.frame(Chromosome = c(seq(1:22),'X','Y'),Col = rep(c('grey','black'),length.out=length(unique(Chr_Chr_Cytoband$Chromosome))))
+   #Merge colors with values per chromosome
+   Chr_Chr_Cytoband_col <- merge(Freq_melt, Chr_band_Col, by = 'Chromosome') 
+   Chr_Chr_Cytoband_col <- Chr_Chr_Cytoband_col[order(as.numeric(as.character(Chr_Chr_Cytoband_col$Chromosome))),]
+   Chr_Chr_Cytoband_col[(Chr_Chr_Cytoband_col$Col=='grey'),'Freq'] <- 1*-1
+   Chr_Chr_Cytoband_col[(Chr_Chr_Cytoband_col$Col!='grey'),'Freq'] <- 2*-1
+
+  barplot_cytoband <- ggplot(data=Chr_Chr_Cytoband_col, aes(x=Cytoband, y=1, fill=as.factor(Col))) + geom_bar(stat="identity") + scale_fill_manual(values=c('grey','black')) + theme_classic() + theme_void() + theme(legend.position = "none")
+  
+  Chr_Chr_Cytoband_col_count <- as.data.frame(table(Chr_Chr_Cytoband_col$Chromosome)) 
+  colnames(Chr_Chr_Cytoband_col_count)<- c('Chromosome', 'Count')
+  png("tst1.png",width = 1000,height = 1000, res = 300)
+  ggarrange(barplot, barplot_cytoband, heatmap, heights=c(0.3,0.01,1))
+  dev.off()
+
+   
+  
+```
+
+Multipanel plot for CNAs by Size  
+```{r, eval=FALSE}
+# library(IRanges)
+library(GenomicRanges)
+library(reshape2)
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(cowplot)
+library(egg)
+my.path <- '/proj/sens2019505/nobackup/nima/merged_results/ASCAT/'
+samples <- read.table(paste0(my.path,'vcf.files'),header=F)
+samples <- as.data.frame(samples[order(samples[,1]),])
+clinical_data <- read.table('/proj/sens2019505/nobackup/nima/merged_results/Clinical_data.txt', header = T)
+cytoband <- read.table(paste0(my.path,'cytoBand_arm_number.bed'),header=F,fill = T)
+colnames(cytoband) <- c('Chr', 'Start', 'End', 'Cytoband', 'Chr_Cytoband')
+cytoband$Arm <- paste0(cytoband$Chr,substr(as.character(cytoband$Cytoband),1,1))
+cytoband$ID <- paste0(cytoband$Chr, '_', cytoband$Start, '_', cytoband$End)
+##Creating Cytoband dataframe
+CNA_df <- matrix(NA,nrow = nrow(cytoband), ncol = nrow(samples)+1)
+colnames(CNA_df) <- c('Chr_Cytoband', samples[,1])
+CNA_df <- as.data.frame(CNA_df) 
+CNA_df$Chr_Cytoband <- cytoband$Chr_Cytoband
+##
+##Reading files intersected with cytobands
+#Creating empty tbale to sve size of CNAs
+my_stats <- c('Chr_Cytoband','CNA', 'size')
+my_stats_df <- data.frame(matrix(0,ncol = length(my_stats),nrow=1))     
+colnames(my_stats_df) <- my_stats
+my_stats_df <- my_stats_df[FALSE,]
+
+my_list <- list()
+for(i in 1:nrow(samples)){
+  sample <- as.character(samples[i,1])
+  tmp_data <- read.table(paste0(my.path,sample,'T_cytoband.bed'),header = F, stringsAsFactors = FALSE)
+  colnames(tmp_data) <- c('chr', 'startpos', 'endpos', 'nMajor', 'nMinor', 'Chr_Cytoband')
+  tmp_data$ID <- paste0(tmp_data$chr, '_', tmp_data$startpos, '_', tmp_data$endpos) ##Create IDs
+  ##Read ploidy reported by ASCAT
+  tmp_ploidy <- read.table(paste0(my.path,sample,'/',sample,'T.purityploidy.txt'),header = T, stringsAsFactors = FALSE)[,2]
+  
+  ##Calculate data for GAIN/LOSS,....
+  tmp_data$CNA <- NA #Add a coulmn to save copy number abberation (Normal copies will be saved as NA)
+  tmp_data$SUM <- rowSums(tmp_data[,4:5]) #Sum nMajor and nMinor to create tot_number
+    tmp_data[(tmp_data$SUM == 0), 'SUM'] <- 0.15 #Replace zero values 
+  ##
+  ##Genotype Gain/Loss/Deletion
+  tmp_data[((tmp_data$SUM) > tmp_ploidy+ 0.6),'CNA'] <- 2 #Gain
+  tmp_data[((tmp_data$SUM) < tmp_ploidy- 0.6),'CNA'] <- 1 #Loss
+  tmp_data[((tmp_data$SUM) == 0.15),'CNA'] <- 1*-1 #Del
+  Neutral_freq <- as.numeric(as.vector(Neutral_freq <- as.data.frame(table(tmp_data[is.na(tmp_data$CNA),'SUM']))[1,1]))
+  tmp_data$LogR2 <- log2(tmp_data$SUM/2)
+  tmp_data$LogR_Neutral_Freq <- log2(tmp_data$SUM/Neutral_freq)
+  ##
+  ##Save genotypes per cytoband for all individuals in a table
+  for(c in 1:nrow(CNA_df)){
+    cat('\r Cytoband:', as.character(CNA_df$Chr_Cytoband[c]))
+    tmp_CNA <- tmp_data[(as.character(tmp_data$Chr_Cytoband) == as.character(CNA_df$Chr_Cytoband[c])),]
+    tmp_CNA$size <- abs(tmp_CNA$startpos - tmp_CNA$endpos)
+    tmp_CNA <- tmp_CNA[!is.na(tmp_CNA$CNA),]
+    tmp_CNA <- tmp_CNA[(tmp_CNA$size >= 1000),] #Keep events larger than 1000 bp
+    my_stats_df <- rbind.data.frame(my_stats_df, c(rep(sample, nrow(tmp_CNA)), tmp_CNA$Chr_Cytoband, tmp_CNA$CNA, tmp_CNA$size)) #Save the size and CNA to visualise the distribution
+    #If there is only one row then report the mutation
+    if( nrow(tmp_CNA) == 1){
+      if(!is.na(tmp_CNA$CNA)){
+        CNA_df[c,as.character(samples[i,1])] <- tmp_CNA$CNA
+      }
+    }else{
+      #If there are more than one row check if there is any CNA
+      #If you see there are more than one row then check the size of events 
+      if(nrow(tmp_CNA) > 1){
+         # if(nrow(tmp_CNA)>=1){
+          final_CNA <- 0
+          for(cna in c(-1, 1, 2)){
+            sum_size_CNA <- sum(tmp_CNA[(tmp_CNA$CNA == cna), 'size'])
+            if(sum_size_CNA > final_CNA){
+              final_CNA <- cna
+            }
+          }
+          CNA_df[c,as.character(samples[i,1])] <- as.character(freq_CNA[order(freq_CNA$Freq,decreasing = T),][1,'Var1'])
+        # }
+      }
+    }
+  }
+  ##
+  write.table(tmp_data, paste0(my.path, sample, 'T_cytoband_CNA.bed'), col.names = T, row.names = F, quote = F, sep = '\t')
+  tmp_list <- list(tmp_data) #Create a list
+  my_list <- append(my_list,tmp_list) #append to list of list
+}
+names(my_list) <- samples[,1] #Name each list by individuals name
+
+##Plotting size distribution per genotype
+my_stats_df <- cbind.data.frame(sample = unlist(lapply(names(my_list), function(x) (rep(x, nrow(my_list[[x]]))))),
+                 chr = unlist(lapply(names(my_list), function(x) (my_list[[x]][,'chr']))), 
+                 start = unlist(lapply(names(my_list), function(x) (my_list[[x]][,'startpos']))), 
+                 end = unlist(lapply(names(my_list), function(x) (my_list[[x]][,'endpos']))),
+                 CNA = unlist(lapply(names(my_list), function(x) (my_list[[x]][,'CNA']))),
+                 size = unlist(lapply(names(my_list), function(x) (abs(my_list[[x]][,'startpos'] - my_list[[x]][,'endpos'])))))
+#all events
+pdf('CNA_size_dist.pdf')
+boxplot(log10(my_stats_df$size) ~ my_stats_df$CNA, main = 'Size distribution based on genotype', xaxt = 'n', col = 'lightblue', xlab = 'Genotypes', ylab = 'log10(Size)')
+axis(side = 1, at = 1:3, labels = c('Deletion', 'Loss', 'Gain'))
+dev.off()
+#events >=1 kb
+pdf('CNA_size_dist_larger_1kb.pdf')
+boxplot(log10(my_stats_df[(my_stats_df$size >= 1000), 'size']) ~ my_stats_df[(my_stats_df$size >= 1000), 'CNA'], main = 'Size distribution based on genotype (> 1kb)', xaxt = 'n', col = 'lightblue', xlab = 'Genotypes', ylab = 'log10(Size)')
+axis(side = 1, at = 1:3, labels = c('Deletion', 'Loss', 'Gain'))
+dev.off()
+##
+
+##Extracting only genotypes (without Chr_Cytoband info)
+###Converting to numeric sample by sample
+CNA_df_numeric <- as.numeric(CNA_df[,2]) 
+for(i in 3:ncol(CNA_df)){
+  CNA_df_numeric <- cbind.data.frame(CNA_df_numeric,as.numeric(CNA_df[,i]))
+}
+colnames(CNA_df_numeric) <- samples[,1]
+rownames(CNA_df_numeric) <- CNA_df$Chr_Cytoband
+CNA_df_numeric <- CNA_df_numeric[rowSums(is.na(CNA_df_numeric))<ncol(CNA_df_numeric),] #select rows with counts
+###
+##
+
+##Order by chromosome number
+CNA_df_numeric$Chr <- gsub("p.*|q.*", replacement="", perl=T, x=rownames(CNA_df_numeric))
+CNA_df_numeric[(CNA_df_numeric$Chr == "X"), 'Chr'] <- 23
+CNA_df_numeric[(CNA_df_numeric$Chr == "Y"), 'Chr'] <- 24
+CNA_df_numeric <- CNA_df_numeric[order(as.numeric(CNA_df_numeric$Chr), decreasing=F),]
+CNA_df_numeric <- CNA_df_numeric[order(as.numeric(CNA_df_numeric$Chr)),-14]
+
+
+
+CNA_df_numeric_t <- t(CNA_df_numeric)
+CNA_df_numeric_t <- cbind.data.frame(ID = colnames(CNA_df_numeric),CNA_df_numeric_t)
+CNA_df_numeric_melt <- melt(CNA_df_numeric_t, id.vars="ID")
+colnames(CNA_df_numeric_melt) <- c('ID','Cytoband','Mutation')
+CNA_df_numeric_melt[is.na(CNA_df_numeric_melt$Mutation),'Mutation'] <- 0
+##
+##Multipanel plot
+#Barplot: Frequency of different genotypes per segments/cytoband of each chromosome
+CNA_df_numeric_t[is.na(CNA_df_numeric_t)] <- 0 #Replace NAs with zero for plotting 
+Freq <- (table(c(col(CNA_df_numeric_t[2:ncol(CNA_df_numeric_t)])), unlist(c(CNA_df_numeric_t[,2:ncol(CNA_df_numeric_t)])))) #Generate frequency of each genotypes 
+rownames(Freq) <- colnames(CNA_df_numeric_t[,2:ncol(CNA_df_numeric_t)]) #name rows by samples
+colnames(Freq) <- c('Deletion', 'No_Change', 'Loss', 'Gain') #name columns by genotype category
+Freq_melt <- melt(Freq[,c(1,3:4)]) #Metling the freq table to have counts per cytoband + genotype
+colnames(Freq_melt) <- c('Cytoband', 'Mutation', 'Freq') 
+Freq_melt$Chromosome <- gsub("p.*|q.*", replacement="", perl=T, x = as.character(Freq_melt$Cytoband)) #Remove p|q
+
+barplot <- ggplot(data=Freq_melt, aes(x=Cytoband, y=Freq, fill = as.factor(Mutation))) + geom_bar(stat="identity") + scale_fill_manual(values=c('darkblue','lightblue', 'red')) + theme_classic() + 
+  theme(axis.title.x=element_blank(), axis.text.x=element_blank(),axis.ticks.x=element_blank(),
+        legend.position = "none")
+#Heatmap: genotypes of each individual per segment/cytoband
+
+
+heatmap <- qplot(x=Cytoband, y=ID, data=CNA_df_numeric_melt, fill=as.factor(Mutation), geom="tile") + scale_fill_manual(values = c('darkblue','gray95','lightblue', 'red'),labels = c('Deletion', 'No change', 'Loss','Gain'), guide_legend(title= 'CNA', guide_legend()))+ theme(axis.title.x = element_blank(),axis.text.x = element_blank(), axis.ticks.x = element_blank()) + theme(legend.position = "bottom")#+ labs(fill ="CNA")#;heatmap;dev.off()
+heatmap.clean <- heatmap +
+  theme(legend.direction = "horizontal", axis.title.x = element_blank(),
+        axis.text.x = element_blank(), axis.ticks.x = element_blank(), legend.position="top")
+#Adding chromosome info to the plot
+#Create matrix with values to plot chromosome with different color 
+Chr_Chr_Cytoband <- cbind.data.frame(Chromosome = gsub("p.*|q.*", replacement="", perl=T, x=rownames(CNA_df_numeric)), Cytoband = rownames(CNA_df_numeric),Value = 1)
+Chr_Chr_Cytoband <- Chr_Chr_Cytoband[order(as.numeric(as.character(Chr_Chr_Cytoband$Chromosome))),]
+#Create table with alternate color for chromosomes (Gray, Black)
+Chr_band_Col <- cbind.data.frame(Chromosome = c(seq(1:22),'X','Y'),Col = rep(c('grey','black'),length.out=length(unique(Chr_Chr_Cytoband$Chromosome))))
+#Merge colors with values per chromosome
+Chr_Chr_Cytoband_col <- merge(Freq_melt, Chr_band_Col, by = 'Chromosome') 
+Chr_Chr_Cytoband_col <- Chr_Chr_Cytoband_col[order(as.numeric(as.character(Chr_Chr_Cytoband_col$Chromosome))),]
+Chr_Chr_Cytoband_col[(Chr_Chr_Cytoband_col$Col=='grey'),'Freq'] <- 1*-1
+Chr_Chr_Cytoband_col[(Chr_Chr_Cytoband_col$Col!='grey'),'Freq'] <- 2*-1
+
+barplot_cytoband <- ggplot(data=Chr_Chr_Cytoband_col, aes(x=Cytoband, y=1, fill=as.factor(Col))) + geom_bar(stat="identity") + scale_fill_manual(values=c('grey','black')) + theme_classic() + theme_void() + theme(legend.position = "none")
+
+Chr_Chr_Cytoband_col_count <- as.data.frame(table(Chr_Chr_Cytoband_col$Chromosome)) 
+colnames(Chr_Chr_Cytoband_col_count)<- c('Chromosome', 'Count')
+pdf("ASCAT_Heatmap_Barplot_selected_by_size.pdf",width = 10,height = 10)
+ggarrange(barplot, barplot_cytoband, heatmap, heights=c(0.3,0.01,1))
+dev.off()
+##
+##Create table with coordinates
+CNA_df_numeric$Chr_Cytoband <- rownames(CNA_df_numeric)
+write.table(merge(cytoband[,c('Chr', 'Start', 'End', 'Chr_Cytoband')], CNA_df_numeric, by = 'Chr_Cytoband'), "CNA_All_samples_by_size_202010.txt", col.names =  T, row.names = T, quote = F, sep = '\t')
+```
+
+# RNAseq
+Convert gff to gene list
+```{bash, eval = F, echo = T}
+ zcat gencode.v19.annotation.gtf.gz | cut -f9 | sed 's/gene_id "//' | sed 's/";.* gene_name "/\t/' | sed 's/".*//' | grep --color=auto -v "#" | sort -k1,1 -u > gencode.v19.annotation.txt
+ 
+```
+
+## Expression analyses
+**PLEASE NOTE THAT THE RNASEQ READS WERE ALIGNED ON GRCH37**  
+```{r functions, echo = T, eval = F}
+library(edgeR)
+run_edge_R <- function(data.TMM, A, B, annotation, group){
+  no_fdr <- 0
+  ndata<-data.TMM[,c(A,B)] #Selecting columns
+  y <- DGEList(counts=ndata,group=group) #Creating edgeR object 
+  keep<-rowSums(cpm(y) > 1) >=4 ##At least three of the samples should have cpm above 1. CPM is one of the metrics commonly used to measure the expression
+  y<-y[keep,] 
+  #y <- calcNormFactors(y) to normalize the data but it may not be needed for your data
+  y <- estimateCommonDisp(y) #Estimate Common Negative Binomial Dispersion by Conditional Maximum Likelihood. Please read edgeR manual
+  y <- estimateTagwiseDisp(y) # Estimate Empirical Bayes Tagwise Dispersion Values. Please read edgeR manual
+  et = exactTest(y) #Pairwise comparison ()
+  tTags = topTags(et,n=NULL) #list tested genes
+  FC.CPM.FDR<-cbind(row.names(tTags$table),tTags$table) #name the rows. 
+  colnames(FC.CPM.FDR)[1]<-"gene_id" #Rename the column to use for adding annotation info frmo annotation matrix/table/data.frame
+  write.table(y$samples,"library-size-norm.factors.txt",row.names=F,quote=F,sep="\t") #Write normalization factors. 
+  
+  source("rnaseq_plot_funcs.R") #These are already written functions to color significant genes by raw p_value or FDR
+  png("plot_MA.png",width=1500,height=1000,res=125)
+  plot_MA(et$table$logCPM,et$table$logFC,et$table$PValue)
+  dev.off()
+  png("Volcano.png",width=1000,height=1000,res=125)
+  plot_Volcano(et$table$logFC, et$table$PValue) 
+  dev.off()
+  write.table(FC.CPM.FDR,"logFC-CPM-FDR.txt",row.names=F,quote=F,sep="\t")
+  
+  png("plot_MA-FDR.png",width=1500,height=1000,res=125)
+  plot_MA(FC.CPM.FDR$logCPM,FC.CPM.FDR$logFC,FC.CPM.FDR$FDR)
+  dev.off()
+  png("Volcano-FDR.png",width=1000,height=1000,res=125)
+  plot_Volcano(FC.CPM.FDR$logFC, FC.CPM.FDR$FDR) 
+  dev.off()
+
+  
+  
+  ##To get DE genes
+  library(reshape2)
+  de <- decideTestsDGE(et, p=0.05,adjust.method="fdr",lfc=1) #Select genes with FDR < 0.05 and log fold change >=1 or <=-1
+  DE_summary<-summary(de)
+  if(sum(DE_summary[c(1,3)]) == 0){
+    de <- decideTestsDGE(et, p=0.05,adjust.method="none",lfc=1) #Select genes with FDR < 0.05 and log fold change >=1 or <=-1
+    DE_summary<-summary(de)
+    print(' PLEASE NOTE THAT WE SITCHED OFF THE MULTIPLE TESTING DUE TO THE FACT THAT AFTER CORRECTION NO GENE WAS SELECTED BY FDR <0.01')
+    no_fdr <- 1
+  }
+  write.table(DE_summary,"DE-summary-gene-count.txt",sep="\t",quote=F,row.names=T,col.names=F)
+  isDE<-as.logical(de)
+  DEnames<-as.matrix((rownames(y)[isDE]))
+  colnames(DEnames)<-"gene_id"
+  tmp<-merge(DEnames,annotation,by="gene_id")#,all.x=T)
+  FinalDE<-merge(tmp,FC.CPM.FDR,by="gene_id")#,all.x=T)
+  
+  if(sum(DE_summary[c(1,3)])>=2){
+    ##heatmap of DE 
+    library(cluster)
+    library(gplots)
+    
+    FinalDE<-merge(FinalDE,data.TMM[,c(1,c(A,B))],by="gene_id",all.x=T)
+    #Write significant or DE genes with stats and original normalized expression
+    write.table(FinalDE,"DE-edgeR-results.txt",row.names=F,sep="\t",quote=F,col.names=T)
+    data.TMM.matrix = FinalDE[,c(7:ncol(FinalDE))] # remove the gene column since its now the rowname value
+    rownames(data.TMM.matrix) = FinalDE$gene_id # set rownames to gene identifiers
+    data.TMM.matrix = as.matrix(data.TMM.matrix) # convert to matrix
+    cr = cor(data.TMM.matrix, method='spearman')
+    data.TMM.matrix = log2(data.TMM.matrix+1)
+    data.TMM.matrix = t(scale(t(data.TMM.matrix), scale=F)) # center rows, mean substracted
+    head(data.TMM.matrix)
+    gene_dist = dist(data.TMM.matrix, method='euclidean')
+    hc_genes = hclust(gene_dist, method='complete')
+    hc_samples = hclust(as.dist(1-cr), method="complete") # cluster conditions
+    gene_partition_assignments <- cutree(as.hclust(hc_genes), k=6);
+    partition_colors = rainbow(length(unique(gene_partition_assignments)), start=0.4, end=0.95)
+    gene_colors = partition_colors[gene_partition_assignments]
+    quantBrks = quantile(data.TMM.matrix, c(0.03, 0.97))
+    myheatcol = bluered(75)
+    pdf("DE-edgeR-results-TMM-FPKM-heatmap_with_genes.pdf", height=10, width= 9)
+    heatmap.2(data.TMM.matrix, dendrogram='row', Rowv=as.dendrogram(hc_genes), Colv=F, 
+              col=myheatcol, RowSideColors=gene_colors, scale="none", density.info="none", trace="none", key=TRUE, keysize=1.2, cexCol=1, lmat=rbind(c(5,0,4,0),c(3,1,2,0)), lhei=c(1.5,5),lwid=c(1.5,0.2,2.5,1.5), margins=c(10,2), breaks=seq(quantBrks[1], quantBrks[2], length=76),main="log2 (normalized expression + 1)")
+    dev.off()
+    return(FinalDE)
+  }
+  if(sum(DE_summary[c(1,3)]) == 1){
+    FinalDE<-merge(FinalDE[(FinalDE$PValue<=0.05),],data.TMM[,c(1,c(A,B))],by="gene_id",all.x=T)
+    write.table(FinalDE,"DE-edgeR-results.txt",row.names=F,sep="\t",quote=F,col.names=T)
+    data.TMM.matrix = FinalDE[,c(7:ncol(FinalDE))] # remove the gene column since its now the rowname value
+    rownames(data.TMM.matrix) = FinalDE$gene_id # set rownames to gene identifiers
+    data.TMM.matrix = as.matrix(data.TMM.matrix) # convert to matrix
+    data.TMM.matrix <- cbind.data.frame(Expression = t(data.TMM.matrix), Group = group)
+    return(FinalDE)
+  }
+  if(sum(DE_summary[c(1,3)]) == 0){
+    print('There are either no genes significant with FDR/P-value < 0.05 or less than two genes')
+  }
+}
+```
+
+
+## edgeR only gene expression
+```{r, eval = F, echo = T}
+library(edgeR)
+library(gplots)
+##Loading the data
+path <- '/proj/sens2019505/Results/RNAseq/'
+#Loading annotation to convert EnsemblID to Gene_name
+annotation <- read.table(paste0(path, 'gencode.v19.annotation.txt'), header =F)
+colnames(annotation) <- c('gene_id', 'gene_name')
+data <- read.table(paste0(path,'merged_gene_counts.txt'), header = T)
+tmp_samples <- data.frame(NGI_ID = colnames(data)[2:ncol(data)])
+samples_info <- read.table(paste0(path,'Samples_info.txt'), header = T)
+colnames(data) <- c('gene_id',
+merge(tmp_samples, samples_info, by = 'NGI_ID')[,'Sample'])
+
+row.names(data)<-data[,1]
+colnames(data)[1] <- 'gene_id'
+data[1,]
+
+##Normalising expressions/counts by library size
+y <- DGEList(counts=data[,-1], group=factor(colnames(data[,-1])))
+y <- calcNormFactors(y)
+y$samples$eff.lib.size <- y$samples$lib.size * y$samples$norm.factors
+write.table(y$samples,  paste0(path,"library-size-norm.factors.txt"), col.names = T, row.names = F, sep = '\t' , quote = F)
+
+data.TMM <- cbind.data.frame(gene_id = data$gene_id, y$counts/y$samples$norm.factors)
+data.TMM.sample_info <- data.frame(Sample = colnames(data.TMM), order = 1:ncol(data.TMM))
+##
+
+# ##Plotting MDS
+png(paste0(path, 'plotMDS.png'), res=200,width=5000,height=5000)
+cex.main=0.8
+plotMDS(y, method = "bcv", col =  as.numeric(as.factor(substr(y$samples$group, 1,4))), main = "Biological coefficient variation MDS")
+legend("bottomright", as.character(unique(y$samples$group)), col=2:1, pch=20)
+dev.off()
+##
+
+##DE analyses
+LoH <- data.frame(Sample = c("101",	"102",	"104",	"105",	"106",	"201",	"202",	"203",	"204", "205",	"206",	"207",	"208", "2597_N", "2269_N"), LoH = c("LoH",	"Normal",	"LoH",	"Normal",	"Normal",	"Normal",	"LoH",	"Normal",	"Normal",	"Normal",	"Normal",	"LoH", "LoH", "Healthy", "Healthy"))
+# data.TMM <- data.TMM[,-1]
+data.TMM.sample_info <- data.frame(Sample = colnames(data.TMM), order = 1:ncol(data.TMM))
+data.TMM.sample_info <- merge(data.TMM.sample_info, LoH, by = 'Sample')
+A <- data.TMM.sample_info[(data.TMM.sample_info$LoH == 'LoH'), 'order']
+B <- data.TMM.sample_info[(data.TMM.sample_info$LoH != 'LoH'), 'order']
+group <- c(as.character(data.TMM.sample_info[(data.TMM.sample_info$LoH == 'LoH'), 'LoH'] ), as.character(data.TMM.sample_info[(data.TMM.sample_info$LoH != 'LoH'), 'LoH'] ))
+results <- run_edge_R(data.TMM, A, B, annotation, group)
+##DGCR8
+###Expression distance 
+DGCR8_dist <- as.matrix(dist(diag(data.TMM[annotation[(annotation$gene_name == 'DGCR8'),'gene_id'],2:ncol(data.TMM)])))
+colnames(DGCR8_dist) <- colnames(data.TMM)[2:ncol(data.TMM)]
+rownames(DGCR8_dist) <- colnames(data.TMM)[2:ncol(data.TMM)]
+pdf(paste0(path,"DGCR8_normalized_expression_dist.pdf"), width = 10, height = 10)
+heatmap.2(DGCR8_dist, dendrogram='both', Rowv=T, Colv=T, scale="none", density.info="none", trace="none", key=TRUE, keysize=1.2, cexCol=0.8, margins=c(5,10), main='Normalized expression distance of DGCR8', col = bluered(20))
+dev.off()
+
+data.TMM.matrix <- DGCR8_dist <- as.matrix(diag(data.TMM[annotation[(annotation$gene_name == 'DGCR8'), 'gene_id'], 2:ncol(data.TMM)]))
+colnames(data.TMM.matrix) <- colnames(data.TMM)[2:ncol(data.TMM)]
+rownames(data.TMM.matrix) <- colnames(data.TMM)[2:ncol(data.TMM)]
+data.TMM.matrix = as.matrix(data.TMM.matrix) # convert to matrix
+cr = cor(data.TMM.matrix, method='spearman')
+data.TMM.matrix = log2(data.TMM.matrix+1)
+data.TMM.matrix = t(scale(t(data.TMM.matrix), scale=F)) # center rows, mean substracted
+head(data.TMM.matrix)
+gene_dist = dist(data.TMM.matrix, method='euclidean')
+hc_genes = hclust(gene_dist, method='complete')
+hc_samples = hclust(as.dist(1-cr), method="complete") # cluster conditions
+gene_partition_assignments <- cutree(as.hclust(hc_genes), k=6);
+partition_colors = rainbow(length(unique(gene_partition_assignments)), start=0.4, end=0.95)
+gene_colors = partition_colors[gene_partition_assignments]
+quantBrks = quantile(data.TMM.matrix, c(0.03, 0.97))
+myheatcol = bluered(75)
+
+#Cluster based on LoH
+LoH <- data.frame(Sample = c("101",	"102",	"104",	"105",	"106",	"201",	"202",	"203",	"204", "205",	"206",	"207",	"208", "2597_N", "2269_N"), LoH = c("LoH",	"Normal",	"LoH",	"Normal",	"Normal",	"Normal",	"LoH",	"Normal",	"Normal",	"Normal",	"Normal",	"LoH", "LoH", "Healthy", "Healthy"))
+DGCR8 <- data.TMM[gsub(pattern = '\\..*', '',annotation[(annotation$gene_name == 'DGCR8'),'gene_id'], perl = T),2:ncol(data.TMM)]
+DGCR8_table <- cbind.data.frame(Sample = colnames(DGCR8), t(DGCR8))
+DGCR8_table <- merge(DGCR8_table, LoH, by= "Sample")
+library(ggplot2)
+DGCR8_table <- DGCR8_table[order(DGCR8_table$LoH),]
+pdf(paste0(path,'Samples_LoH_and_Healthy_DGCR8.pdf'), width = 10, height = 6)
+ggplot(data=DGCR8_table, aes(x= as.factor(Sample), y=(ENSG00000128191), fill = LoH)) +
+  geom_bar(stat="identity") + scale_x_discrete(limits = as.factor(DGCR8_table$Sample)) + xlab("Sample") + ylab('Normalised expression') + theme_classic() + labs(fill = "")
+dev.off()
+
+# 
+#  , RowSideColors=gene_colors, scale="none", density.info="none", trace="none", key=TRUE, keysize=1.2, cexCol=1, lmat=rbind(c(5,0,4,0),c(3,1,2,0)), lhei=c(1.5,5),lwid=c(1.5,0.2,2.5,1.5), margins=c(10,2), breaks=seq(quantBrks[1], quantBrks[2], length=76),main="log2 (normalized expression + 1)")
+##
+
+##Distribution of all expressed genes
+data.TMM_melt <- melt(data.TMM) #Convert to ID ~expression
+data.TMM_melt$log2_expression <- log2(data.TMM_melt$value+1) #Convert to log2
+pdf('Samples_Expression_dist.pdf', width = 10, height = 6)
+boxplot(data.TMM_melt$log2_expression ~  data.TMM_melt$variable, xlab = 'Sample', ylab = 'log2(Normalized expression)')
+points(10, log2(2181), col = 'red' , pch = 20) #DGCR8
+dev.off()
+```
+
+## edgeR tumor + 2 normal samples only gene expression
+```{r, eval = F, echo = T}
+library(edgeR)
+library(gplots)
+##Loading the data
+path <- '/proj/sens2019505/Results/RNAseq/'
+#Loading annotation to convert EnsemblID to Gene_name
+annotation <- read.table(paste0(path, 'gencode.v19.annotation.txt'), header =F)
+colnames(annotation) <- c('gene_id', 'gene_name')
+data <- read.table(paste0(path,'merged_gene_counts.txt'), header = T)
+data_normal <- read.table(paste0(path,'merged_gene_counts_normal_samples.txt'), header = T)
+tmp_samples <- data.frame(NGI_ID = colnames(data)[2:ncol(data)])
+samples_info <- read.table(paste0(path,'Samples_info.txt'), header = T)
+samples_info_normal <- read.table(paste0(path,'Samples_info_normal.txt'), header = T)
+samples_info <- rbind.data.frame(samples_info, samples_info_normal)
+colnames(data) <- c('gene_id',
+merge(tmp_samples, samples_info, by = 'NGI_ID')[,'Sample'])
+##Load gene expression of normal individuals
+data_normal <- read.table(paste0(path,'merged_gene_counts_normal_samples.txt'), header = T)
+colnames(data_normal) <- c('gene_id','2597_N', '2269_N')
+##
+##Merging tumour and normal samples
+data <- merge(data, data_normal, by = "gene_id")
+##
+
+row.names(data)<-data[,1]
+colnames(data)[1] <- 'gene_id'
+data[1,]
+
+##Normalising expressions/counts by library size
+y <- DGEList(counts=data[,-1], group=factor(colnames(data[,-1])))
+y <- calcNormFactors(y)
+y$samples$eff.lib.size <- y$samples$lib.size * y$samples$norm.factors
+write.table(y$samples,  paste0(path,"library-size-norm.factors.txt"), col.names = T, row.names = F, sep = '\t' , quote = F)
+
+data.TMM <- cbind.data.frame(gene_id = data$gene_id, y$counts/y$samples$norm.factors)
+data.TMM.sample_info <- data.frame(Sample = colnames(data.TMM), order = 1:ncol(data.TMM))
+##
+
+# ##Plotting MDS
+png(paste0(path, 'plotMDS.png'), res=200,width=2500,height=2500)
+cex.main=0.8
+plotMDS(y, method = "bcv", col =  as.numeric(as.factor(substr(y$samples$group, 1,4))), main = "Biological coefficient variation MDS")
+#legend("bottomright", as.character(unique(y$samples$group)), col=2:1, pch=20)
+dev.off()
+##
+
+##DE analyses
+LoH <- data.frame(Sample = c("101",	"102",	"104",	"105",	"106",	"201",	"202",	"203",	"204", "205",	"206",	"207",	"208", "2597_N", "2269_N"), LoH = c("LoH",	"Normal",	"LoH",	"Normal",	"Normal",	"Normal",	"LoH",	"Normal",	"Normal",	"Normal",	"Normal",	"LoH", "LoH", "Healthy", "Healthy"))
+# data.TMM <- data.TMM[,-1]
+data.TMM.sample_info <- data.frame(Sample = colnames(data.TMM), order = 1:ncol(data.TMM))
+data.TMM.sample_info <- merge(data.TMM.sample_info, LoH, by = 'Sample')
+A <- data.TMM.sample_info[(data.TMM.sample_info$LoH == 'LoH'), 'order']
+B <- data.TMM.sample_info[(data.TMM.sample_info$LoH != 'LoH'), 'order']
+group <- c(as.character(data.TMM.sample_info[(data.TMM.sample_info$LoH == 'LoH'), 'LoH'] ), as.character(data.TMM.sample_info[(data.TMM.sample_info$LoH != 'LoH'), 'LoH'] ))
+results <- run_edge_R(data.TMM, A, B, annotation, group)
+##DGCR8
+###Expression distance 
+DGCR8_dist <- as.matrix(dist(diag(data.TMM[annotation[(annotation$gene_name == 'DGCR8'),'gene_id'],2:ncol(data.TMM)])))
+colnames(DGCR8_dist) <- colnames(data.TMM)[2:ncol(data.TMM)]
+rownames(DGCR8_dist) <- colnames(data.TMM)[2:ncol(data.TMM)]
+pdf(paste0(path,"DGCR8_normalized_expression_dist.pdf"), width = 10, height = 10)
+heatmap.2(DGCR8_dist, dendrogram='both', Rowv=T, Colv=T, scale="none", density.info="none", trace="none", key=TRUE, keysize=1.2, cexCol=0.8, margins=c(5,10), main='Normalized expression distance of DGCR8', col = bluered(20))
+dev.off()
+
+data.TMM.matrix <- DGCR8_dist <- as.matrix(diag(data.TMM[annotation[(annotation$gene_name == 'DGCR8'), 'gene_id'], 2:ncol(data.TMM)]))
+colnames(data.TMM.matrix) <- colnames(data.TMM)[2:ncol(data.TMM)]
+rownames(data.TMM.matrix) <- colnames(data.TMM)[2:ncol(data.TMM)]
+data.TMM.matrix = as.matrix(data.TMM.matrix) # convert to matrix
+cr = cor(data.TMM.matrix, method='spearman')
+data.TMM.matrix = log2(data.TMM.matrix+1)
+data.TMM.matrix = t(scale(t(data.TMM.matrix), scale=F)) # center rows, mean substracted
+head(data.TMM.matrix)
+gene_dist = dist(data.TMM.matrix, method='euclidean')
+hc_genes = hclust(gene_dist, method='complete')
+hc_samples = hclust(as.dist(1-cr), method="complete") # cluster conditions
+gene_partition_assignments <- cutree(as.hclust(hc_genes), k=6);
+partition_colors = rainbow(length(unique(gene_partition_assignments)), start=0.4, end=0.95)
+gene_colors = partition_colors[gene_partition_assignments]
+quantBrks = quantile(data.TMM.matrix, c(0.03, 0.97))
+myheatcol = bluered(75)
+
+#Cluster based on LoH
+LoH <- data.frame(Sample = c("101",	"102",	"104",	"105",	"106",	"201",	"202",	"203",	"204", "205",	"206",	"207",	"208"), LoH = c("LoH",	"Normal",	"LoH",	"Normal",	"Normal",	"Normal",	"LoH",	"Normal",	"Normal",	"Normal",	"Normal",	"LoH", "LoH"))
+DGCR8 <- data.TMM[gsub(pattern = '\\..*', '',annotation[(annotation$gene_name == 'DGCR8'),'gene_id'], perl = T),2:ncol(data.TMM)]
+DGCR8_dist <- as.matrix(dist(diag(data.TMM[annotation[(annotation$gene_name == 'DGCR8'),'gene_id'],2:ncol(data.TMM)])))
+colnames(DGCR8_dist) <- colnames(data.TMM)[2:ncol(data.TMM)]
+rownames(DGCR8_dist) <- colnames(data.TMM)[2:ncol(data.TMM)]
+#Reorder the columns and rows
+my_order <- as.character(LoH[c(which(LoH$LoH == 'LoH'), which(LoH$LoH == 'Normal')),'Sample'])
+LoH_cluster_col <- c(rep('#add8e6', length(which(LoH$LoH == 'LoH'))), rep('#00008b', length(which(LoH$LoH != 'LoH'))))
+data.TMM.matrix <- DGCR8_dist[my_order, my_order]
+
+data.TMM.matrix = log2(data.TMM.matrix+1)
+data.TMM.matrix = t(scale(t(data.TMM.matrix), scale=F)) # center rows, mean substracted
+head(data.TMM.matrix)
+quantBrks <- quantile(data.TMM.matrix, c(0.03, 0.97))
+myheatcol = bluered(30)
+diag(data.TMM.matrix) <- NA
+
+pdf(paste0(path,"DGCR8_normalized_expression_dist_non_centered.pdf"), width = 10, height = 10)
+# heatmap.2(data.TMM.matrix, dendrogram='none', Rowv=F, Colv=F, scale="none", density.info="none", trace="none", key=TRUE, keysize=1.2, cexCol=0.8, margins=c(5,10), main='log2(Normalized expression distance of DGCR8); mean centered', col=myheatcol, RowSideColors=LoH_cluster_col, na.color = 'black')
+heatmap.2(data.TMM.matrix, dendrogram='none', Rowv=F, Colv=F, scale="none", density.info="none", trace="none", key=TRUE, keysize=1.2, cexCol=0.8, margins=c(5,10), main='log2(Normalized expression distance of DGCR8)', col=myheatcol, RowSideColors=LoH_cluster_col, na.color = 'black')
+dev.off()
+DGCR8_table <- cbind.data.frame(Sample = colnames(DGCR8), t(DGCR8))
+DGCR8_table <- merge(DGCR8_table, LoH, by= "Sample")
+library(ggplot2)
+DGCR8_table <- DGCR8_table[order(DGCR8_table$LoH),]
+DGCR8_table <- read.table('~/Dropbox/NBIS/Projects/Leukemia_Sebastian/RNAseq/Samples_LoH_DGCR8', header = T)
+pdf('~/Dropbox/NBIS/Projects/Leukemia_Sebastian/RNAseq/Samples_LoH_DGCR8.pdf', width = 10, height = 6)
+ggplot(data=DGCR8_table, aes(x= as.factor(Sample), y=(ENSG00000128191), fill = LoH)) +
+  geom_bar(stat="identity") + scale_x_discrete(limits = as.factor(DGCR8_table$Sample)) + xlab("Sample") + ylab('Normalised expression') + theme_classic() + labs(fill = "")
+dev.off()
+
+##Top 20 Mutsig  + genes of interest heatmap
+genes_of_interest <- data.frame(gene_name = c(as.character(Mutsig$gene[1:20]), 'DICER1', 'DROSHA'))
+genes_of_interest <- merge(annotation, genes_of_interest, by = 'gene_name')
+genes_of_interest$gene_id <- gsub(pattern = '\\..*', '', genes_of_interest$gene_id) 
+data.TMM_genes_of_interest <- merge(data.TMM, genes_of_interest, by = 'gene_id')
+rownames(data.TMM_genes_of_interest) = data.TMM_genes_of_interest$gene_name # set rownames to gene identifiers
+data.TMM_genes_of_interest <- data.TMM_genes_of_interest[,2:16]
+data.TMM_genes_of_interest <- data.TMM_genes_of_interest[,c(as.character(LoH[which(LoH$LoH == 'Healthy'), 'Sample']), as.character(LoH[which(LoH$LoH == 'LoH'), 'Sample']), as.character(LoH[which(LoH$LoH == 'Normal'), 'Sample']))]
+data.TMM_genes_of_interest= as.matrix(data.TMM_genes_of_interest) # convert to matrix
+cr = cor(data.TMM_genes_of_interest, method='spearman')
+data.TMM_genes_of_interest= log2(data.TMM_genes_of_interest+1)
+data.TMM_genes_of_interest= t(scale(t(data.TMM_genes_of_interest), scale=F)) # center rows, mean substracted
+head(data.TMM_genes_of_interest)
+gene_dist = dist(data.TMM_genes_of_interest, method='euclidean')
+hc_genes = hclust(gene_dist, method='complete')
+hc_samples = hclust(as.dist(1-cr), method="complete") # cluster conditions
+gene_partition_assignments <- cutree(as.hclust(hc_genes), k=6);
+partition_colors = rainbow(length(unique(gene_partition_assignments)), start=0.4, end=0.95)
+gene_colors = partition_colors[gene_partition_assignments]
+quantBrks = quantile(data.TMM_genes_of_interest, c(0.03, 0.97))
+myheatcol = bluered(75)
+LoH_cluster_col <- c(rep('#f8766d', length(which(LoH$LoH == 'Healthy'))),
+                     rep('#00ba38', length(which(LoH$LoH == 'LoH'))), 
+                     rep('#619cff', length(which(LoH$LoH == 'Normal'))))
+pdf(paste0(path, 'Normalized_expression_MutSig20.pdf'), width = 10, height=10)
+heatmap.2(data.TMM_genes_of_interest, dendrogram='row', Rowv=T, Colv=F, scale="none", density.info="none", trace="none", key=TRUE, keysize=1.2, cexCol=0.8, margins=c(5,10), main='log2(Normalized expression) of genes of interest',  ColSideColors=LoH_cluster_col, na.color = 'black', col = cm.colors(25))
+dev.off()
+```
+## DEXSeq (Exon usage)  
+Extract readcounts over exons.  
+```{bash, eval = F}
+
+singularity run test_dexseq_2.0.sif python3 DEXSeq/inst/python_scripts/dexseq_count.py -p yes -s reverse -a 20 -f bam -r pos GRCh37_annotation_flattened.gff /castor/project/proj/RAW/Sebastian_RNA_seq_13_FTC/P9655/01-Results/results/STAR/${line}Aligned.sortedByCoord.out.bam ${line}_DEXSeq_count
+```
+
+Analysing exon expression.  
+```{r, eval = F, echo = T}
+library(DEXSeq)
+path <- '/castor/project/proj/Results/RNAseq/Exon_usage/'
+flattenedFile <- paste0(path, 'GRCh37_annotation_flattened.gff')
+sampleTable <- data.frame(row.names = 1, Sample = c("101",	"102",	"104",	"105",	"106",	"201",	"202",	"203",	"204", "205",	"206",	"207",	"208"), condition = c("LoH",	"Normal",	"LoH",	"Normal",	"Normal",	"Normal",	"LoH",	"Normal",	"Normal",	"Normal",	"Normal",	"LoH", "LoH"), libType = rep('paired-end', 13))
+countFiles <- c("101_DEXSeq_count", "102_DEXSeq_count", "201_DEXSeq_count", "104_DEXSeq_count", "105_DEXSeq_count", "106_DEXSeq_count", "202_DEXSeq_count", "203_DEXSeq_count", "204_DEXSeq_count", "205_DEXSeq_count", "206_DEXSeq_count", "207_DEXSeq_count", "208_DEXSeq_count")
+dxd = DEXSeqDataSetFromHTSeq(
+   countFiles,
+   sampleData=sampleTable,
+   design= ~ sample + exon + condition:exon,
+   flattenedfile=flattenedFile )
+
+load('.RData')
+#Load Normalized gene expression
+DGCR8_TMM <-  cbind.data.frame(Sample = colnames(data.TMM[,-1]), ENSG00000128191 = t(data.TMM['ENSG00000128191',-1]))
+sampleTable <- cbind.data.frame(Sample = rownames(sampleTable), sampleTable)
+DGCR8_TMM <- merge(DGCR8_TMM, sampleTable[,c('Sample', 'condition')], by = 'Sample')
+DGCR8_TMM_barplot <- ggplot(data=DGCR8_TMM, aes(x= as.factor(Sample), y=(ENSG00000128191), fill = condition)) +
+  geom_bar(stat="identity") + scale_x_discrete(limits = as.factor(DGCR8_TMM$Sample)) + xlab("Sample") + ylab('Normalised expression') + theme_classic() + labs(fill = "")
+# eff_lib_size <- read.table('/proj/sens2019505/Results/RNAseq/library-size-norm.factors.txt', header = T)
+#Differential expression analyses
+library(GenomicRanges)
+library(reshape2)
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(cowplot)
+library(egg)
+library(DEXSeq)
+library(BiocParallel)
+library(gplots)
+load('.RData')
+BPPARAM = MulticoreParam(16) #Set n CPUs
+dxd = estimateSizeFactors( dxd ) #Normalise the data
+dxd = estimateDispersions( dxd ) #Estimate dispersion
+dxd = testForDEU( dxd )
+dxd = estimateExonFoldChanges( dxd, fitExpToVar="condition", BPPARAM = BPPARAM)
+dxr1 = DEXSeqResults( dxd)
+pdf(paste0(path,'Dispersion.pdf'), width = 10, height = 6)
+plotDispEsts( dxd ) #Plot dispersion
+dev.off()
+pdf('plotMA.pdf', width = 10, height = 6)
+plotMA( dxr1, cex=0.8 )
+dev.off()
+# q(save = 'yes')
+##Extract normalized expression of DGCR2
+dxd_raw_expression <-  counts(dxd) 
+dxd_noramlized_expression <-  counts(dxd) / sizeFactors(dxd)
+DGCR8_noramlized_expression <- as.data.frame(dxd_noramlized_expression[grep('ENSG00000128191', rownames(dxd_noramlized_expression)),1:13])
+colnames(DGCR8_noramlized_expression) <-  dxd$sample[1:13]
+DGCR8_dxr1 <- as.data.frame(dxr1[grep('ENSG00000128191', rownames(dxr1)), ] )
+DGCR8_noramlized_expression <- cbind.data.frame(t(DGCR8_noramlized_expression), ID = colnames(DGCR8_noramlized_expression))
+#Remove exons with no expression in all samples
+DGCR8_noramlized_expression <- DGCR8_noramlized_expression[,c(which(colSums(DGCR8_noramlized_expression[,1:ncol(DGCR8_noramlized_expression)-1])>0),ncol(DGCR8_noramlized_expression))]
+DGCR8_noramlized_expression_melt <- melt(DGCR8_noramlized_expression, id.vars= 'ID') #Melt the data.frame
+colnames(DGCR8_noramlized_expression_melt) <- c('ID', 'Exon', 'Expression') 
+DGCR8_noramlized_expression_melt$Exon <- gsub('ENSG00000128191.*:', '', DGCR8_noramlized_expression_melt$Exon) #Remove Gene ID
+DGCR8_ENST00000351989_exons <- data.frame(Exon = c("E001", "E003", "E004", "E005", "E006", "E007", "E008", "E009", "E010", "E013", "E014", "E016", "E017", "E018", "E019", "E021", "E022", "E023", "E025", "E026"))
+DGCR8_noramlized_expression_melt <- merge(DGCR8_noramlized_expression_melt, DGCR8_ENST00000351989_exons, by = 'Exon')
+
+heatmap <- qplot(y=Exon, x=ID, data=DGCR8_noramlized_expression_melt, fill=log2(Expression), geom="tile") + theme_classic()
+pdf('DGCR8_normalized_expression.pdf', width = 10, height = 10)
+ggarrange(DGCR8_TMM_barplot, heatmap, heights=c(0.3,1))
+dev.off()
+
+
+
+pdf('DGCR8_exon.pdf', width = 10, height = 6)
+plotDEXSeq( dxr1, "ENSG00000128191+ENSG00000221366+ENSG00000266567", legend=TRUE, cex.axis=1.2, cex=1.3, lwd=2 )
+plotDEXSeq( dxr1, "ENSG00000128191+ENSG00000221366+ENSG00000266567", legend=TRUE, cex.axis=1.2, cex=1.3, lwd=2 , displayTranscripts=TRUE)
+plotDEXSeq( dxr1, "ENSG00000128191+ENSG00000221366+ENSG00000266567", expression=FALSE, norCounts=TRUE, legend=TRUE, cex.axis=1.2, cex=1.3, lwd=2 )
+dev.off()
+
+```
